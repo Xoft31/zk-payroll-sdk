@@ -49,6 +49,11 @@ import {
   type SettlementReceiptValidationOptions,
 } from "./settlement/receipt";
 import {
+  validateWithholdingConfig as validateWithholdingConfigHelper,
+  type WithholdingConfigValidation,
+  type WithholdingConfigValidationOptions,
+} from "./payroll/withholdingConfig";
+import {
   validatePaymentDestination,
   getRegisteredDestinationValidationHook,
   setDestinationValidationHook,
@@ -544,6 +549,31 @@ export class PayrollService {
     options?: SettlementReceiptValidationOptions
   ): SettlementReceiptValidation {
     return validateSettlementReceiptHelper(receipt, options);
+  }
+
+  /**
+   * Validates a withholding configuration before it is applied to a payroll
+   * run (#519). Returns an explicit result instead of throwing, and never
+   * echoes employee identifiers or configured amounts — failure messages carry
+   * only stable codes, sanitized text, and redacted identifiers, so they are
+   * safe for logs and UI feedback.
+   */
+  validateWithholdingConfig(
+    config: unknown,
+    options?: WithholdingConfigValidationOptions
+  ): WithholdingConfigValidation {
+    return validateWithholdingConfigHelper(config, options);
+  }
+
+  /**
+   * Static helper: validates a withholding configuration (#519) without a
+   * service instance.
+   */
+  static validateWithholdingConfig(
+    config: unknown,
+    options?: WithholdingConfigValidationOptions
+  ): WithholdingConfigValidation {
+    return validateWithholdingConfigHelper(config, options);
   }
 
   /**

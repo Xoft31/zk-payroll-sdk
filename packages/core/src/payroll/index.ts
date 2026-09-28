@@ -4,6 +4,7 @@ export * from "./lockTimestamp";
 export * from "./cancellation";
 export * from "./cancelledStatus";
 export * from "./minimumAmount";
+export * from "./withholdingConfig";
 export * from "./timestamps";
 export * from "./validation";
 export * from "./errors";

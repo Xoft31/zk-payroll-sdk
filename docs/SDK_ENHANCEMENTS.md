@@ -259,3 +259,56 @@ const estimator = new TransactionFeeEstimator(server);
 const direct = await estimator.estimate(unsignedTx);
 const reused = estimatePreparedTransactionFee(prepared.transaction);
 ```
+
+## Issue #519 — Withholding Configuration Validator
+The withholding configuration validator is implemented in
+`packages/core/src/payroll/withholdingConfig.ts` and runs before a withholding
+rule is applied to a payroll run.
+
+`validateWithholdingConfig(config, options?)` returns an explicit result —
+`{ ok: true, state: "validated", config, displayEmployeeId }` or
+`{ ok: false, code, message, state }` — and never throws. `state` separates
+`"malformed"` (not a configuration object at all) from `"invalid"` (a
+configuration failing policy).
+
+Stable error codes are exported via `WithholdingConfigErrorCode` and cover:
+missing/unsupported method, missing/invalid/out-of-range rate, missing/
+invalid/negative/zero fixed amount, an amount contradicting the method, an
+invalid or exceeded per-run cap, unsupported rounding, an empty jurisdiction
+label, and a missing or mismatched employee reference.
+
+Policy options: `expectedEmployeeId`, `requireEmployeeId`, `maxRate`
+(default 100), `allowZeroRate`, `allowZeroAmount`, `decimals` (default 7),
+`includeAmounts`, and `includeEmployeeId`.
+
+Privacy: employee identifiers are redacted (`emp***321`) in every message and
+configured amounts are never echoed unless `includeAmounts` is explicitly set,
+so results are safe to log, persist, and render in UI feedback.
+
+Integration: exported from the payroll module barrel, available as
+`PayrollService.validateWithholdingConfig()` (instance and static), with
+`assertWithholdingConfig()` for a throwing gate, `validateBatchWithholdingConfigs()`
+for per-employee rule sets, and a typed `WithholdingConfigError`.
+
+### Usage
+```typescript
+import { PayrollService } from '@zk-payroll/core';
+import { validateBatchWithholdingConfigs } from '@zk-payroll/core/payroll';
+
+const result = PayrollService.validateWithholdingConfig(
+  { employeeId: 'emp-123456', method: 'percentage', rate: 12.5 },
+  { expectedEmployeeId: 'emp-123456' }
+);
+
+if (!result.ok) {
+  console.error(result.code, result.message); // safe to log
+} else {
+  const { method, rate, rounding } = result.config; // normalized
+}
+
+// Batch: one rule per employee, issues carry their array index
+const batch = validateBatchWithholdingConfigs(rules, { maxRate: 50 });
+if (!batch.isValid) {
+  console.error(batch.issues); // sanitized, indexed failures
+}
+```
