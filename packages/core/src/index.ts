@@ -78,6 +78,7 @@ export {
   detectDeprecatedConfigFields,
 } from "./config";
 export * from "./cache";
+export * from "./amendments";
 export * from "./types";
 export * from "./progress";
 export {
