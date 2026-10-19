@@ -4,6 +4,7 @@
 This checklist defines the required pre-release and post-release verification steps for publishing the `@zk-payroll/core` SDK package to npm. Following this checklist ensures release repeatability, artifact integrity, and documentation alignment.
 
 ---
+..
 
 ## 1. Pre-Publish Package Verification
 

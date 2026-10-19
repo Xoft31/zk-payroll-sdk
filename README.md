@@ -685,6 +685,7 @@ if (validation.ok) {
   const authorized = authorizePayrollRunAmendment(amendment, "GADMIN...");
 }
 ```
+..
 
 ## Signed payroll instruction builder
 

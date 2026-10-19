@@ -32,7 +32,7 @@ export interface PayoutEntry {
 
 /** Threshold violation codes */
 export type PayoutThresholdViolationCode =
-  "BELOW_THRESHOLD" | "ZERO_AMOUNT" | "NEGATIVE_AMOUNT" | "UNKNOWN_ASSET";
+  "BELOW_THRESHOLD" | "ZERO_AMOUNT" | "NEGATIVE_AMOUNT" | "UNKNOWN_ASSET" | "INVALID_THRESHOLD";
 
 /** Structured violation descriptor */
 export interface PayoutThresholdViolation {
@@ -116,6 +116,19 @@ export function validatePayoutThreshold(
   const empDisplay = entry.employeeId || "anonymous";
   const empRedacted = shouldRedactEmp ? redactEmpId(entry.employeeId) : empDisplay;
   const thresholdMap = buildThresholdMap(thresholds);
+
+  if (defaultThreshold < 0n || [...thresholdMap.values()].some(({ min }) => min < 0n)) {
+    return {
+      isValid: false,
+      violation: {
+        code: "INVALID_THRESHOLD",
+        redactedEmployeeId: empRedacted,
+        asset: entry.asset,
+        message: "Payout threshold configuration is invalid.",
+        redactedMessage: "Payout threshold configuration is invalid.",
+      },
+    };
+  }
 
   // Negative amount
   if (entry.amount < 0n) {

@@ -26,6 +26,24 @@ describe("Payout Threshold Validator", () => {
   };
 
   describe("validatePayoutThreshold", () => {
+    it("rejects negative threshold configuration before evaluating a payout", () => {
+      const result = validatePayoutThreshold(
+        { amount: 100n, asset: "native", employeeId: "emp-12345" },
+        { defaultThreshold: -1n }
+      );
+      expect(result.isValid).toBe(false);
+      expect(result.violation?.code).toBe("INVALID_THRESHOLD");
+    });
+
+    it("rejects a negative configured asset threshold deterministically", () => {
+      const result = validatePayoutThreshold(
+        { amount: 100n, asset: "native", employeeId: "emp-12345" },
+        { thresholds: [{ asset: "native", minimumAmount: -1n }] }
+      );
+      expect(result.isValid).toBe(false);
+      expect(result.violation?.code).toBe("INVALID_THRESHOLD");
+    });
+
     it("returns valid for a payout above the default threshold", () => {
       const entry: PayoutEntry = { amount: 100n, asset: "OTHER", employeeId: "emp-12345" };
       const result = validatePayoutThreshold(entry, { defaultThreshold: 50n });
