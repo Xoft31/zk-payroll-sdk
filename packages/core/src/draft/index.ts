@@ -26,4 +26,10 @@ export type {
   RedactedDraftPreview,
   SensitiveFieldConfig,
 } from "./EncryptedDraftSerializer";
-export { canonicalizeDraft, computeDraftChecksum, computeDraftChecksumAsync, verifyDraftChecksum } from "./draftChecksum";
+export {
+  canonicalizeDraft,
+  computeDraftChecksum,
+  computeDraftChecksumAsync,
+  verifyDraftChecksum,
+} from "./draftChecksum";
+export * from "./draftLockInspection";

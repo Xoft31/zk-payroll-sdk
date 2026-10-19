@@ -144,7 +144,7 @@ export function normalizeSupportedAsset(raw: RawInput): SupportedAsset {
 export function normalizeSupportedAssets(rawList: unknown): SupportedAsset[] {
   if (!Array.isArray(rawList)) {
     throw new ValidationError(
-      "Supported assets response must be an array – received " + typeof rawList,
+      "Supported assets response must be an array — received " + typeof rawList,
       "assets"
     );
   }
@@ -210,7 +210,7 @@ export async function getSupportedAssets(
   try {
     return normalizeSupportedAssets(raw);
   } catch (error) {
-    // Re-throw ValidationErrors unchanged – they already contain clear guidance
+    // Re-throw ValidationErrors unchanged – no need to wrap them again
     if (error instanceof ValidationError) throw error;
     const msg = error instanceof Error ? error.message : String(error);
     throw new ValidationError(
@@ -229,4 +229,143 @@ export async function getEnabledSupportedAssets(
 ): Promise<SupportedAsset[]> {
   const all = await getSupportedAssets(fetcher);
   return all.filter((a) => a.enabled);
+}
+
+/**
+ * Result of an asset availability check.
+ */
+export interface AssetAvailabilityResult {
+  /** Whether the asset is available for payroll operations */
+  available: boolean;
+  /** The normalized asset if found */
+  asset: SupportedAsset | null;
+  /** Human-readable reason when the asset is not available */
+  reason?: string;
+  /** Machine-readable code for the availability state */
+  code: AssetAvailabilityCode;
+}
+
+/**
+ * Machine-readable codes describing why an asset is available or not.
+ */
+export type AssetAvailabilityCode =
+  | "AVAILABLE"
+  | "ASSET_NOT_FOUND"
+  | "ASSET_DISABLED"
+  | "ASSET_MISSING_CONTRACT";
+
+/**
+ * Options for `checkAssetAvailability`.
+ */
+export interface AssetAvailabilityOptions {
+  /**
+   * Whether a native asset (XLM, no contractId) is acceptable.
+   * Defaults to true. Set to false to require a token contract.
+   */
+  allowNative?: boolean;
+  /**
+   * Whether disabled assets should be treated as available.
+   * Defaults to false.
+   */
+  allowDisabled?: boolean;
+}
+
+/**
+ * Checks whether an asset identified by symbol is available for payroll
+ * operations given a list of supported assets.
+ *
+ * This is a pure, side-effect-free function suitable for use as a pre-flight
+ * safety check before building or submitting a payroll transaction. It never
+ * throws for an unknown asset; instead it returns a descriptive result so callers
+ * can decide how to surface the error.
+ *
+ * @param symbol - Asset symbol (case-insensitive), e.g. "usdc"
+ * @param assets - Normalized supported assets to search
+ * @param options - Availability policy flags
+ * @returns An availability result with a machine-readable code
+ *
+ * @example
+ * const { available, reason } = checkAssetAvailability("USDC", assets);
+ * if (!available) throw new ValidationError(reason);
+ */
+export function checkAssetAvailability(
+  symbol: unknown,
+  assets: SupportedAsset[],
+  options: AssetAvailabilityOptions = {}
+): AssetAvailabilityResult {
+  if (!Array.isArray(assets)) {
+    throw new ValidationError(
+      "Assets must be an array of normalized supported assets",
+      "assets"
+    );
+  }
+
+  const normalizedSymbol = normalizeAssetSymbol(symbol);
+  const allowNative = options.allowNative ?? true;
+  const allowDisabled = options.allowDisabled ?? false;
+
+  const match = assets.find((a) => a.symbol === normalizedSymbol);
+
+  if (!match) {
+    return {
+      available: false,
+      asset: null,
+      code: "ASSET_NOT_FOUND",
+      reason: `Asset "${normalizedSymbol}" is not in the list of supported assets.`,
+    };
+  }
+
+  if (!allowDisabled && !match.enabled) {
+    return {
+      available: false,
+      asset: match,
+      code: "ASSET_DISABLED",
+      reason: `Asset "${normalizedSymbol}" is currently disabled for payroll.`,
+    };
+  }
+
+  if (!allowNative && match.contractId === null) {
+    return {
+      available: false,
+      asset: match,
+      code: "ASSET_MISSING_CONTRACT",
+      reason: `Asset "${normalizedSymbol}" is native and has no token contract, but native assets are not allowed.`,
+    };
+  }
+
+  return {
+    available: true,
+    asset: match,
+    code: "AVAILABLE",
+  };
+}
+
+/**
+ * Convenience wrapper that fetches supported assets and checks availability
+ * in a single call. This is the recommended entry point for payroll flows that
+ * need to fail fast with an actionable error before building a transaction.
+ *
+ * @param symbol - Asset symbol to verify (case-insensitive)
+ * @param fetcher - Async function returning the raw supported assets response
+ * @param options - Availability policy flags
+ * @throws ValidationError when the asset is not available
+ */
+export async function assertAssetAvailable(
+  symbol: unknown,
+  fetcher: () => Promise<unknown>,
+  options: AssetAvailabilityOptions = {}
+): Promise<SupportedAsset> {
+  const assets = await getSupportedAssets(fetcher);
+  const result = checkAssetAvailability(symbol, assets, options);
+
+  if (!result.available || result.asset === null) {
+    throw new ValidationError(
+      result.reason ?? `Asset ${String(symbol)} is not available for payroll.`,
+      "asset",
+      "VALIDATION_ERROR",
+      { code: result.code }
+    );
+  }
+
+  return result.asset;
 }

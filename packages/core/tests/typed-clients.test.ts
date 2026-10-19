@@ -616,10 +616,23 @@ describe("PaymentExecutorClient", () => {
       expect(client.invokeStub.mock.calls[0][0]).toBe("cancel");
     });
 
-    it("encodes one XDR argument", async () => {
+    it("encodes one XDR argument when no reasonCode is provided", async () => {
       await client.cancel(42n, signer);
       const args: xdr.ScVal[] = client.invokeStub.mock.calls[0][1];
       expect(args).toHaveLength(1);
+    });
+
+    it("encodes two XDR arguments when a valid reasonCode is provided", async () => {
+      await client.cancel(42n, signer, "insufficient_funds");
+      const args: xdr.ScVal[] = client.invokeStub.mock.calls[0][1];
+      expect(args).toHaveLength(2);
+      expect(args[1].sym().toString()).toBe("insufficient_funds");
+    });
+
+    it("throws an error when an invalid reasonCode is provided", async () => {
+      await expect(client.cancel(42n, signer, "invalid_reason")).rejects.toThrow(
+        "Unsupported cancellation reason: invalid_reason"
+      );
     });
   });
 

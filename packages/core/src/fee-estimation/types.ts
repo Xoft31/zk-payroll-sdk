@@ -66,6 +66,13 @@ export interface TransactionFeeEstimatorOptions {
    * Defaults to 0 (no buffer).
    */
   bufferBps?: number;
+  /**
+   * Maximum total fee (stroops) accepted for this estimate. When the estimated
+   * total (`baseFee + resourceFee + bufferFee`) exceeds it, a
+   * `TransactionFeeCeilingError` is thrown before anything is signed or
+   * submitted. Must be a positive integer; omit for no ceiling.
+   */
+  feeCeiling?: bigint;
   /** Optional explicit request ID for correlation tracing. */
   requestId?: string;
 }

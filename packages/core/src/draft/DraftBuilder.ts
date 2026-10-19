@@ -242,6 +242,32 @@ export class DraftBuilder {
   }
 
   /**
+   * Inspects the draft's lock readiness and operational lock status (#537).
+   *
+   * Evaluates whether the current draft contents can be safely locked,
+   * checking for active recipient locks, draft validity, and authorizer rules.
+   */
+  inspectLock(
+    options?: import("./draftLockInspection").DraftLockInspectionOptions
+  ): import("./draftLockInspection").DraftLockInspectionResult {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { inspectDraftLock } = require("./draftLockInspection");
+    return inspectDraftLock(this, options);
+  }
+
+  /**
+   * Asserts that the draft can be safely locked, throwing DraftLockError if not (#537).
+   */
+  assertLockable(
+    options?: import("./draftLockInspection").DraftLockInspectionOptions
+  ): this {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { assertDraftLockable } = require("./draftLockInspection");
+    assertDraftLockable(this, options);
+    return this;
+  }
+
+  /**
    * Returns an immutable `PayrollDraft` snapshot suitable for serialization
    * or handoff to the submission step.
    *

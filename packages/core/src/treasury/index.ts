@@ -40,5 +40,8 @@ export type {
 // ── Treasury Readiness Result Types (#276) ────────────────────────────────
 export * from "./readiness";
 
+// ── Treasury Replenishment Readiness Analysis (#626) ──────────────────────
+export * from "./replenishmentReadiness";
+
 // ── Payer Account Status Reader (#559) ─────────────────────────────────────
 export * from "./payerAccountStatus";

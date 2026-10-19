@@ -26,6 +26,24 @@ describe("Payout Threshold Validator", () => {
   };
 
   describe("validatePayoutThreshold", () => {
+    it("rejects negative threshold configuration before evaluating a payout", () => {
+      const result = validatePayoutThreshold(
+        { amount: 100n, asset: "native", employeeId: "emp-12345" },
+        { defaultThreshold: -1n }
+      );
+      expect(result.isValid).toBe(false);
+      expect(result.violation?.code).toBe("INVALID_THRESHOLD");
+    });
+
+    it("rejects a negative configured asset threshold deterministically", () => {
+      const result = validatePayoutThreshold(
+        { amount: 100n, asset: "native", employeeId: "emp-12345" },
+        { thresholds: [{ asset: "native", minimumAmount: -1n }] }
+      );
+      expect(result.isValid).toBe(false);
+      expect(result.violation?.code).toBe("INVALID_THRESHOLD");
+    });
+
     it("returns valid for a payout above the default threshold", () => {
       const entry: PayoutEntry = { amount: 100n, asset: "OTHER", employeeId: "emp-12345" };
       const result = validatePayoutThreshold(entry, { defaultThreshold: 50n });
@@ -167,12 +185,12 @@ describe("Payout Threshold Validator", () => {
 
     it("reports correct summary counts per violation type", () => {
       const entries: PayoutEntry[] = [
-        { amount: 1n, asset: "native", employeeId: "emp-001" },       // below threshold
-        { amount: 2n, asset: "native", employeeId: "emp-002" },       // below threshold
-        { amount: 0n, asset: "USDC", employeeId: "emp-003" },         // zero
-        { amount: -10n, asset: "native", employeeId: "emp-004" },     // negative
-        { amount: -5n, asset: "USDC", employeeId: "emp-005" },        // negative
-        { amount: 100n, asset: "MYSTERY", employeeId: "emp-006" },    // unknown
+        { amount: 1n, asset: "native", employeeId: "emp-001" }, // below threshold
+        { amount: 2n, asset: "native", employeeId: "emp-002" }, // below threshold
+        { amount: 0n, asset: "USDC", employeeId: "emp-003" }, // zero
+        { amount: -10n, asset: "native", employeeId: "emp-004" }, // negative
+        { amount: -5n, asset: "USDC", employeeId: "emp-005" }, // negative
+        { amount: 100n, asset: "MYSTERY", employeeId: "emp-006" }, // unknown
         { amount: 50_000_000n, asset: "native", employeeId: "emp-007" }, // valid
       ];
       const result = validatePayoutThresholdBatch(entries, {

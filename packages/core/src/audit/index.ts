@@ -7,3 +7,5 @@ export * from "./auditAccessRequestSchema";
 export * from "./auditAttestationDigest";
 export * from "./accessExpiry";
 export * from "./auditReferenceAttachment";
+export * from "./grantScope";
+export * from "./auditRetentionSafeguards";

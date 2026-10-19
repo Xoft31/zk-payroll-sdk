@@ -1,3 +1,4 @@
+
 # Multi-Asset Support
 
 The ZK Payroll SDK centralises asset label, decimal, and display behaviour in a single
@@ -13,6 +14,7 @@ without scattering hard-coded decimal counts or symbol strings throughout the co
 | `AssetRegistry` | A shared singleton (or custom instance) that maps asset ids and symbols to their metadata. |
 | `formatAmount` | Converts a raw `bigint` (smallest unit) to a human-readable string using the asset's metadata. |
 | `parseAmount` | Converts a human-readable string back to a raw `bigint`. |
+| `assertAssetAvailable` | Throws a descriptive error if an asset id or symbol is not registered — use before building payroll payloads. |
 
 ## Built-in assets
 

@@ -1,4 +1,8 @@
-import { validateEmployeeReferenceId, assertValidEmployeeReferenceId } from "./referenceId";
+import {
+  validateEmployeeReferenceId,
+  assertValidEmployeeReferenceId,
+  normalizeEmployeeIdentifier,
+} from "./referenceId";
 
 describe("Employee Reference ID Validator (#388)", () => {
   it("accepts valid reference IDs", () => {
@@ -18,5 +22,12 @@ describe("Employee Reference ID Validator (#388)", () => {
     expect(() => assertValidEmployeeReferenceId("INVALID@ID")).toThrow(
       "Invalid employee reference ID"
     );
+  });
+
+  it("normalizes valid employee identifiers and rejects invalid input", () => {
+    expect(normalizeEmployeeIdentifier("  EMP-99  ")).toBe("emp-99");
+    expect(normalizeEmployeeIdentifier("emp_1001")).toBe("emp_1001");
+    expect(normalizeEmployeeIdentifier("EMP 100")).toBeNull();
+    expect(normalizeEmployeeIdentifier(null)).toBeNull();
   });
 });

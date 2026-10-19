@@ -1,4 +1,4 @@
-import { AssetId, AssetMetadata, AssetMetadataInput } from "./types";
+import { AssetId, AssetMetadata, AssetMetadataInput, AssetAvailability } from "./types";
 
 /**
  * Built-in well-known assets bundled with the SDK.
@@ -198,6 +198,71 @@ export class AssetRegistryClass {
    */
   has(idOrSymbol: string): boolean {
     return this.get(idOrSymbol) !== undefined;
+  }
+
+  /**
+   * Check whether an asset is available for use in a payroll flow.
+   *
+   * This is a safety check intended to be called before constructing a
+   * payroll transaction.  It verifies that the asset is registered and that
+   * its metadata is internally consistent (non-empty symbol/label and a
+   * non-negative integer `decimals` value) so that downstream formatting and
+   * amount conversion cannot silently produce incorrect results.
+   *
+   * Unlike `has`, this method never throws and always returns a structured
+   * result, making it safe to use in validation pipelines and UI code.
+   *
+   * @param idOrSymbol - Asset ID or ticker symbol to check.
+   * @returns An `AssetAvailability` describing whether the asset is usable
+   *   and, when not, a human-readable `reason`.
+   *
+   * @example
+   * ```ts
+   * const result = AssetRegistry.checkAvailability("usdc");
+   * if (!result.available) console.warn(result.reason);
+   * ```
+   */
+  checkAvailability(idOrSymbol: string): AssetAvailability {
+    if (typeof idOrSymbol !== "string" || idOrSymbol.trim() === "") {
+      return {
+        assetId: String(idOrSymbol),
+        available: false,
+        code: "invalid_id",
+        reason: "Asset ID must be a non-empty string.",
+      };
+    }
+
+    const metadata = this.get(idOrSymbol);
+    if (!metadata) {
+      return {
+        assetId: idOrSymbol,
+        available: false,
+        code: "unregistered",
+        reason: `Asset "${idOrSymbol}" is not registered.`,
+      };
+    }
+
+    const hasUsableText =
+      typeof metadata.symbol === "string" &&
+      metadata.symbol.trim() !== "" &&
+      typeof metadata.label === "string" &&
+      metadata.label.trim() !== "";
+    const hasUsableDecimals =
+      typeof metadata.decimals === "number" &&
+      Number.isInteger(metadata.decimals) &&
+      metadata.decimals >= 0;
+
+    if (!hasUsableText || !hasUsableDecimals) {
+      return {
+        assetId: metadata.id,
+        available: false,
+        code: "invalid_metadata",
+        reason: `Registered metadata for asset "${metadata.id}" is not usable for payroll.`,
+        metadata,
+      };
+    }
+
+    return { assetId: metadata.id, available: true, code: "ok", metadata };
   }
 
   /**

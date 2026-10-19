@@ -6,7 +6,14 @@
  *
  * ## Why This Matters
  * Audit screens and compliance dashboards need consistent expiry wording,
- * deterministic warning thresholds, and uniform privacy protection across the SDK.
+ * deterministic warning thresholds, and uniform privacy protection across the SGK.
+ *
+ * ## Retention Safeguards
+ * Audit records carry sensitive access metadata. This module enforces a bounded
+ * retention window for expiry descriptors so that expired delegations cannot be
+ * queried or retained indefinitely. Once an access delegation has been expired
+ * for longer than the retention window, the descriptor is treated as purged and
+ * the auditor identifier is fully redacted.
  */
 
 import { formatDurationMs, parseTimestampMs } from "../utils/date";
@@ -20,6 +27,13 @@ export type AuditorAccessExpiryStatus = "active" | "expiring_soon" | "expired" |
 export const DEFAULT_ACCESS_EXPIRING_SOON_THRESHOLD_MS = 48 * 60 * 60 * 1000;
 
 /**
+ * Default retention window for expired audit access descriptors: 30 days (in ms).
+ * After this window has elapsed since expiry, the descriptor is considered purged
+ * and the auditor identifier is fully redacted.
+ */
+export const DEFAULT_AUDIT_ACCESS_RETENTION_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
  * Options for evaluating expiry status.
  */
 export interface AuditorAccessExpiryOptions {
@@ -27,6 +41,8 @@ export interface AuditorAccessExpiryOptions {
   warningThresholdMs?: number;
   /** Reference timestamp (epoch ms or Date) to compare against. Defaults to Date.now(). */
   referenceTime?: number | Date;
+  /** Retention window after expiry before descriptors are considered purged (ms). */
+  retentionWindowMs?: number;
 }
 
 /**
@@ -61,7 +77,9 @@ export interface AuditorAccessExpiryFormatted {
   remainingMs: number | null;
   /** Formatted duration string (e.g., "3d 4h", "2h 15m", "Expired", "None") */
   remainingFormatted: string;
-  /** Auditor identifier if provided */
+  /** True if the descriptor has been purged by the retention window */
+  isPurged: boolean;
+  /** Auditor identifier if provided and not purged */
   auditorId?: string;
   /** Redacted auditor identifier safe for public display/logs */
   redactedAuditorId?: string;
@@ -98,6 +116,24 @@ function resolveReferenceTime(ref?: number | Date): number {
 }
 
 /**
+ * Resolve the retention window in milliseconds, validating the provided value.
+ *
+ * @param retentionWindowMs - Optional custom retention window.
+ * @throws RangeError if the value is not a non-negative finite number.
+ */
+function resolveRetentionWindow(retentionWindowMs?: number): number {
+  if (retentionWindowMs === undefined) {
+    return DEFAULT_AUDIT_ACCESS_RETENTION_WINDOW_MS;
+  }
+  if (!Number.isFinite(retentionWindowMs) || retentionWindowMs < 0) {
+    throw new RangeError(
+      "retentionWindowMs must be a non-negative finite number of milliseconds"
+    );
+  }
+  return retentionWindowMs;
+}
+
+/**
  * Calculate the expiry status for an auditor's access delegation.
  *
  * @param expiresAt - Expiry timestamp (epoch ms, ISO date string, or Date).
@@ -131,18 +167,23 @@ export function getAuditorAccessExpiryStatus(
 /**
  * Format auditor access expiry details into a rich, UI-ready descriptor.
  *
+ * The descriptor enforces the configured retention window: once an access
+ * delegation has been expired for longer than the retention window, the result is
+ * marked as purged and the auditor identifier is fully redacted.
+ *
  * @param input - Auditor access expiry input data.
  * @returns Formatted result ready for UI rendering and logs.
+ * @throws RangeError if retentionWindowMs is invalid.
  */
 export function formatAuditorAccessExpiry(
   input: AuditorAccessExpiryInput
-): AuditorAccessExpiryFormatted {
+]: AuditorAccessExpiryFormatted {
   const expiresAtMs = parseTimestampMs(input.expiresAt);
   const now = resolveReferenceTime(input.referenceTime);
   const threshold = input.warningThresholdMs ?? DEFAULT_ACCESS_EXPIRING_SOON_THRESHOLD_MS;
+  const retentionWindowMs = resolveRetentionWindow(input.retentionWindowMs);
 
   const auditorId = input.auditorId;
-  const redactedAuditorId = auditorId ? redactAuditorId(auditorId) : undefined;
 
   if (expiresAtMs === null) {
     return {
@@ -155,8 +196,9 @@ export function formatAuditorAccessExpiry(
       expiresAtMs: null,
       remainingMs: null,
       remainingFormatted: "None",
+      isPurged: false,
       auditorId,
-      redactedAuditorId,
+      redactedAuditorId: auditorId ? redactAuditorId(auditorId) : undefined,
     };
   }
 
@@ -164,6 +206,25 @@ export function formatAuditorAccessExpiry(
 
   if (remainingMs <= 0) {
     const elapsedMs = Math.abs(remainingMs);
+    const isPurged = elapsedMs > retentionWindowMs;
+
+    if (isPurged) {
+      return {
+        status: "expired",
+        shortLabel: "Expired",
+        label: "Expired (record purged by retention window)",
+        isExpired: true,
+        isExpiringSoon: false,
+        isActive: false,
+        expiresAtMs,
+        remainingMs,
+        remainingFormatted: "Expired",
+        isPurged: true,
+        auditorId: undefined,
+        redactedAuditorId: "[REDACTED_AUDITOR]",
+      };
+    }
+
     const elapsedStr = formatDurationMs(elapsedMs);
     return {
       status: "expired",
@@ -175,8 +236,9 @@ export function formatAuditorAccessExpiry(
       expiresAtMs,
       remainingMs,
       remainingFormatted: "Expired",
+      isPurged: false,
       auditorId,
-      redactedAuditorId,
+      redactedAuditorId: auditorId ? redactAuditorId(auditorId) : undefined,
     };
   }
 
@@ -193,8 +255,9 @@ export function formatAuditorAccessExpiry(
       expiresAtMs,
       remainingMs,
       remainingFormatted: remainingStr,
+      isPurged: false,
       auditorId,
-      redactedAuditorId,
+      redactedAuditorId: auditorId ? redactAuditorId(auditorId) : undefined,
     };
   }
 
@@ -208,8 +271,9 @@ export function formatAuditorAccessExpiry(
     expiresAtMs,
     remainingMs,
     remainingFormatted: remainingStr,
+    isPurged: false,
     auditorId,
-    redactedAuditorId,
+    redactedAuditorId: auditorId ? redactAuditorId(auditorId) : undefined,
   };
 }
 
@@ -258,4 +322,29 @@ export function isAuditorAccessExpiringSoon(
     referenceTime,
   });
   return status === "expiring_soon";
+}
+
+/**
+ * Check whether an audit access descriptor has been purged by the retention window.
+ *
+ * @param expiresAt - Expiry timestamp.
+ * @param retentionWindowMs - Retention window after expiry (ms).
+ * @param referenceTime - Reference timestamp.
+ * @returns True if the descriptor is considered purged.
+ */
+export function isAuditorAccessPurged(
+  expiresAt?: number | string | Date | null,
+  retentionWindowMs?: number,
+  referenceTime?: number | Date
+): boolean {
+  const expiresAtMs = parseTimestampMs(expiresAt);
+  if (expiresAtMs === null) {
+    return false;
+  }
+  const now = resolveReferenceTime(referenceTime);
+  if (expiresAtMs > now) {
+    return false;
+  }
+  const window = resolveRetentionWindow(retentionWindowMs);
+  return now - expiresAtMs > window;
 }

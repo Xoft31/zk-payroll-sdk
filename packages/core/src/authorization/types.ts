@@ -20,6 +20,7 @@ export interface SignerInfo {
   signedAt?: number;
   rejectedAt?: number;
   rejectionReason?: string;
+  expiredAt?: number;
 }
 
 export interface AuthorizationRequest {
@@ -57,4 +58,23 @@ export interface MultiSignerCoordinatorOptions {
   maxExpiryMs?: number;
   nonceLength?: number;
   defaultPolicyType?: PolicyType;
+  /**
+   * Grace period in milliseconds after a request's expiry time during which
+   * adjustment approvals are still accepted for review but marked as late.
+   */
+  expiryGraceMs?: number;
+  /**
+   * Whether to automatically transition pending signers to the `expired`
+   * state once the request expiry has elapsed.
+   */
+  autoExpire?: boolean;
+}
+
+export interface PayrollAdjustmentExpiryResult {
+  requestId: string;
+  expired: boolean;
+  expiredAt?: number;
+  expiredSigners: SignerInfo[];
+  remainingSigners: SignerInfo[];
+  reason?: string;
 }

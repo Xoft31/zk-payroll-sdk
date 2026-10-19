@@ -23,6 +23,8 @@ export enum PolicyCompileErrorCode {
   INVALID_AUDIT_SETTINGS = "INVALID_AUDIT_SETTINGS",
   /** The asset identifier could not be normalized (delegates to `assetIdentity`). */
   INVALID_ASSET = "INVALID_ASSET",
+  /** An effective/expiration date is unparseable, non-finite, or incoherent (end before start). */
+  INVALID_EFFECTIVE_DATE = "INVALID_EFFECTIVE_DATE",
 }
 
 /**
@@ -99,6 +101,18 @@ export interface PayrollPolicyInput {
   capacityLimits: CapacityLimitsInput;
   reserveRequirements: ReserveRequirementsInput;
   auditSettings: AuditSettingsInput;
+  /**
+   * Optional compensation effective date (ISO 8601 string or epoch milliseconds).
+   * When provided, it must parse to a real date and must not start in the past
+   * relative to the compile-time reference (now, or `now` if given).
+   */
+  effectiveDate?: string | number;
+  /**
+   * Optional compensation end date (ISO 8601 string or epoch milliseconds).
+   * When provided, it must parse to a real date and must be strictly after
+   * `effectiveDate`. Implies `effectiveDate` must also be provided.
+   */
+  endDate?: string | number;
 }
 
 // ── Compiled contract-call payload ───────────────────────────────────────────
@@ -115,6 +129,16 @@ export interface CompiledPayrollPolicy {
   policyId: string;
   /** Canonical asset id, as produced by `normalizeAssetIdentity` (e.g. `"native"` or `"CODE:ISSUER"`). */
   assetId: string;
+  /**
+   * Compensation effective date in epoch milliseconds — present only when the
+   * input provided `effectiveDate`.
+   */
+  effectiveDateMs?: number;
+  /**
+   * Compensation end date in epoch milliseconds — present only when the input
+   * provided `endDate` (which implies `effectiveDate` was also provided).
+   */
+  endDateMs?: number;
   settlement: {
     minDelaySeconds: number;
     maxOpenSeconds: number;

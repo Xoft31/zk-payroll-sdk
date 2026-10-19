@@ -38,6 +38,18 @@ export function validateEmployeeReferenceId(refId: unknown): EmployeeReferenceId
   };
 }
 
+/**
+ * Validates and canonicalizes an employee identifier for payroll lookups.
+ * Surrounding whitespace is removed and case is folded to lowercase so
+ * comparisons remain consistent with employee duplicate detection.
+ * Invalid identifiers return null; use validateEmployeeReferenceId when a
+ * user-facing validation reason is needed.
+ */
+export function normalizeEmployeeIdentifier(value: unknown): string | null {
+  const result = validateEmployeeReferenceId(value);
+  return result.isValid ? result.sanitizedRefId!.toLowerCase() : null;
+}
+
 export function assertValidEmployeeReferenceId(refId: unknown): string {
   const result = validateEmployeeReferenceId(refId);
   if (!result.isValid) {

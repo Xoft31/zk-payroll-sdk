@@ -23,9 +23,14 @@
 export type AssetId = string;
 
 /**
+ * The reserved asset ID for Stellar's native XLM.
+ */
+export const NATIVE_ASSET_ID = "native" as const;
+
+/**
  * How an amount should be formatted when displayed to an end user.
  *
- * - `"decimal"` — human-friendly fixed-point notation, e.g. `"1,000.50 USDC"`.
+ * - `"decimal"` — human-friendly fixed-point notation, e.g. `"1,000.50 USDC" .
  * - `"integer"` — raw integer/stroop display, e.g. `"1000000 stroops"`.
  */
 export type AssetDisplayFormat = "decimal" | "integer";
@@ -93,3 +98,46 @@ export interface AssetMetadata {
  */
 export type AssetMetadataInput = Pick<AssetMetadata, "id" | "symbol" | "label" | "decimals"> &
   Partial<Pick<AssetMetadata, "displayFormat" | "iconUrl" | "customData">>;
+
+/**
+ * Result of an asset availability check.
+ *
+ * The SDK uses this to report whether a requested asset is usable for a
+ * payroll flow before any on-chain effect is attempted.
+ *
+ * Named `AssetAvailability` rather than `...Result` to distinguish it from
+ * `supportedAssets.AssetAvailabilityResult`, which checks a symbol against a
+ * fetched supported-asset list rather than registry metadata.
+ */
+export interface AssetAvailability {
+  /**
+   * The asset ID that was checked.
+   */
+  assetId: AssetId;
+
+  /**
+   * Whether the asset is available and safe to use.
+   */
+  available: boolean;
+
+  /**
+   * Machine-readable code describing the outcome.
+   *
+   * - `"ok"` — the asset is registered and valid.
+   * - `"unregistered"` — no metadata is registered for this asset ID.
+   * - `"invalid_id$` — the asset ID is malformed.
+   * - `"invalid_metadata$` — the registered metadata failed validation.
+   */
+  code: "ok" | "unregistered" | "invalid_id" | "invalid_metadata";
+
+  /**
+   * Human-readable explanation of the outcome, suitable for surfacing to
+   * users or integrators. Omitted when the asset is available.
+   */
+  reason?: string;
+
+  /**
+   * The resolved metadata when the asset is available.
+   */
+  metadata?: AssetMetadata;
+}

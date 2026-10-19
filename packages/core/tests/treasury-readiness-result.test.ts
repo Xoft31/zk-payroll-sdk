@@ -7,6 +7,7 @@ import {
   redactTreasuryReadiness,
   TreasuryReadinessResult,
 } from "../src/treasury/readiness";
+import { analyzeTreasuryReplenishmentReadiness } from "../src/treasury/replenishmentReadiness";
 
 describe("Treasury Readiness Result Type (#276)", () => {
   const NATIVE_ASSET = "native";
@@ -217,5 +218,64 @@ describe("Treasury Readiness Result Type (#276)", () => {
       expect(meta.secretAuthKey).toBe("[REDACTED]");
       expect(meta.normalField).toBe("public_note");
     });
+  });
+});
+
+describe("Treasury Replenishment Readiness (#626)", () => {
+  it("reports a ready treasury without a recommended top-up", () => {
+    const result = analyzeTreasuryReplenishmentReadiness({
+      obligations: [{ asset: "native", requiredAmount: 100n }],
+      treasuryBalances: [{ asset: "native", availableBalance: 110n }],
+      defaultBufferPercent: 10,
+    });
+
+    expect(result.readinessLevel).toBe("ready");
+    expect(result.canExecuteNow).toBe(true);
+    expect(result.assets[0].targetBalance).toBe(110n);
+    expect(result.assets[0].replenishmentAmount).toBe(0n);
+  });
+
+  it("calculates exact multi-asset replenishment recommendations", () => {
+    const result = analyzeTreasuryReplenishmentReadiness({
+      obligations: [
+        { asset: "native", requiredAmount: 101n },
+        { asset: "USDC", requiredAmount: 50n },
+      ],
+      treasuryBalances: [
+        { asset: "native", availableBalance: 100n },
+        { asset: "USDC", availableBalance: 20n },
+      ],
+      defaultBufferPercent: 10,
+    });
+
+    expect(result.readinessLevel).toBe("replenishment_required");
+    expect(result.canExecuteNow).toBe(false);
+    expect(
+      result.assets.map(({ targetBalance, replenishmentAmount }) => [
+        targetBalance,
+        replenishmentAmount,
+      ])
+    ).toEqual([
+      [112n, 12n],
+      [55n, 35n],
+    ]);
+    expect(result.recommendations).toHaveLength(2);
+  });
+
+  it("blocks recommendations when balances are unavailable and validates negative amounts", () => {
+    const result = analyzeTreasuryReplenishmentReadiness({
+      obligations: [{ asset: "native", requiredAmount: 100n }],
+      treasuryBalances: [],
+    });
+
+    expect(result.readinessLevel).toBe("blocked");
+    expect(result.assets[0].replenishmentAmount).toBeUndefined();
+    expect(result.blockers[0]).toContain("refresh treasury balances");
+    expect(() =>
+      analyzeTreasuryReplenishmentReadiness({
+        obligations: [{ asset: "native", requiredAmount: -1n }],
+        treasuryBalances: [],
+      })
+    ).toThrow("must be a non-negative bigint amount");
   });
 });

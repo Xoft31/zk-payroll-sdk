@@ -57,6 +57,28 @@ export interface SelectiveDisclosureAuditPackage {
   metadata?: Record<string, unknown>;
 }
 
+export interface AuditRetentionPolicy {
+  /** Number of days the audit package must be retained. */
+  retentionDays: number;
+  /** Optional absolute expiration timestamp (unix seconds). */
+  expiresAt?: number;
+  /** Optional minimum number of days before a package may be deleted. */
+  minimumRetentionDays?: number;
+  /** Optional maximum number of days a package may be retained. */
+  maximumRetentionDays?: number;
+}
+
+export interface AuditRetentionStatus {
+  /** Whether the package is currently within its retention window. */
+  withinRetentionWindow: boolean;
+  /** Whether the package has expired and may be deleted. */
+  expired: boolean;
+  /** Timestamp at which the package becomes eligible for deletion. */
+  eligibleForDeletionAt?: number;
+  /** Number of seconds remaining until the package becomes eligible for deletion. */
+  retainedSeconds: number;
+}
+
 export interface CreateAuditPackageInput {
   packageId: string;
   payroll: AuditPayrollMetadata;
@@ -66,12 +88,15 @@ export interface CreateAuditPackageInput {
   verificationKeys: AuditVerificationKeyReference[];
   artifactManifestHash?: string;
   metadata?: Record<string, unknown>;
+  retentionPolicy?: AuditRetentionPolicy;
 }
 
 export interface AuditPackageVerificationResult {
   valid: boolean;
   errors: string[];
-}
+  z }
+
+export const AUDIT_PACKAGE_DEFAULT_RETENTION_DAYS = 365;
 
 export async function createSelectiveDisclosureAuditPackage(
   input: CreateAuditPackageInput
@@ -156,9 +181,114 @@ export function applyDisclosureScope(
   return commitments;
 }
 
+export function resolveAuditRetentionPolicy(
+  policy?: AuditRetentionPolicy
+): AuditRetentionPolicy {
+  const resolved: AuditRetentionPolicy = {
+    retentionDays: policy?.retentionDays ?? AUDIT_PACKAGE_DEFAULT_RETENTION_DAYS
+  };
+
+  if (policy?.expiresAt !== undefined) resolved.expiresAt = policy.expiresAt;
+  if (policy?.minimumRetentionDays !== undefined) {
+    resolved.minimumRetentionDays = policy.minimumRetentionDays;
+  }
+  if (policy?.maximumRetentionDays !== undefined) {
+    resolved.maximumRetentionDays = policy.maximumRetentionDays;
+  }
+
+  return resolved;
+}
+
+export function validateAuditRetentionPolicy(policy: AuditRetentionPolicy): string[] {
+  const errors: string[] = [];
+
+  if (!Number.isFinite(policy.retentionDays) || policy.retentionDays <= 0) {
+    errors.push("retentionDays must be a positive number.");
+  }
+
+  if (policy.expiresAt !== undefined && (!Number.isFinite(policy.expiresAt) || policy.expiresAt <= 0)) {
+    errors.push("expiresAt must be a positive unix timestamp.");
+  }
+
+  if (
+    policy.minimumRetentionDays !== undefined &&
+    (!Number.isFinite(policy.minimumRetentionDays) || policy.minimumRetentionDays < 0)
+  ) {
+    errors.push("minimumRetentionDays must be a non-negative number.");
+  }
+
+  if (
+    policy.maximumRetentionDays !== undefined &&
+    (!Number.isFinite(policy.maximumRetentionDays) || policy.maximumRetentionDays <= 0)
+  ) {
+    errors.push("maximumRetentionDays must be a positive number.");
+  }
+
+  if (
+    policy.minimumRetentionDays !== undefined &&
+    policy.maximumRetentionDays !== undefined &&
+    policy.minimumRetentionDays > policy.maximumRetentionDays
+  ) {
+    errors.push("minimumRetentionDays must not exceed maximumRetentionDays.");
+  }
+
+  if (
+    policy.maximumRetentionDays !== undefined &&
+    policy.retentionDays > policy.maximumRetentionDays
+  ) {
+    errors.push("retentionDays must not exceed maximumRetentionDays.");
+  }
+
+  if (
+    policy.minimumRetentionDays !== undefined &&
+    policy.retentionDays < policy.minimumRetentionDays
+  ) {
+    errors.push("retentionDays must be at least minimumRetentionDays.");
+  }
+
+  return errors;
+}
+
+export function evaluateAuditRetentionStatus(
+  auditPackage: SelectiveDisclosureAuditPackage,
+  now: number = Math.floor(Date.now() / 1000)
+): AuditRetentionStatus {
+  const policy = resolveAuditRetentionPolicy(auditPackage.retentionPolicy);
+  const generatedAt = auditPackage.payroll.generatedAt;
+  const retentionSeconds = policy.retentionDays * 86400;
+  const defaultEligibleAt = generatedAt + retentionSeconds;
+  const eligibleForDeletionAt =
+    policy.expiresAt !== undefined
+      ? Math.min(defaultEligibleAt, policy.expiresAt)
+      : defaultEligibleAt;
+
+  const remaining = eligibleForDeletionAt - now;
+  const expired = now >= eligibleForDeletionAt;
+
+  return {
+    withinRetentionWindow: !expired,
+    expired,
+    eligibleForDeletionAt,
+    retainedSeconds: Math.max(0, remaining),
+  };
+}
+
+export function assertAuditPackageDeletable(
+  auditPackage: SelectiveDisclosureAuditPackage,
+  now: number = Math.floor(Date.now() / 1000)
+): void {
+  const status = evaluateAuditRetentionStatus(auditPackage, now);
+  if (!status.expired) {
+    throw new Error(
+      `Audit package ${auditPackage.packageId} is still within its retention window and cannot be deleted until ${status.eligibleForDeletionAt}.`
+    );
+  }
+}
+
 export async function calculateAuditPackageIntegrityHash(
   auditPackage:
-    Omit<SelectiveDisclosureAuditPackage, "integrityHash"> | SelectiveDisclosureAuditPackage
+    | Omit<SelectiveDisclosureAuditPackage, "integrityHash">
+    | SelectiveDisclosureAuditPackage
 ): Promise<string> {
   const { integrityHash: _integrityHash, ...hashable } =
     auditPackage as SelectiveDisclosureAuditPackage;
@@ -212,6 +342,10 @@ function validateAuditPackageShape(
 
   if (auditPackage.proofReferences.length === 0) {
     errors.push("At least one proof reference is required.");
+  }
+
+  if (auditPackage.retentionPolicy) {
+    errors.push(...validateAuditRetentionPolicy(auditPackage.retentionPolicy));
   }
 
   return errors;

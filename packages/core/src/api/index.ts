@@ -14,6 +14,14 @@ export type {
 export * from "../types";
 
 export {
+  CANCELLATION_REASONS,
+  getCancellationReasonLabel,
+  getCancellationReasonDescription,
+  isSupportedCancellationReason,
+} from "../payroll/cancellation";
+export type { CancellationReasonCode, CancellationReasonInfo } from "../payroll/cancellation";
+
+export {
   getContractMetadata,
   isKnownEnvironment,
   listKnownEnvironments,
@@ -29,3 +37,8 @@ export type {
   MetadataValidationResult,
   MetadataValidationError,
 } from "../metadata";
+
+export { PreflightClient } from "../clients/PreflightClient";
+export type { PreflightResult, PreflightFinding } from "../clients/PreflightClient";
+
+export * from "../treasury/replenishmentReadiness";

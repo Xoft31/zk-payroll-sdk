@@ -10,10 +10,14 @@ import type { ServerCacheAdapter } from "./cache/ServerCacheAdapter";
 import { CacheNamespace } from "./cache/types";
 import type { EmployerUpdatedEvent } from "./events/employerUpdated";
 import { redactError } from "./redaction/RedactionEngine";
+import {
+  assertPayrollOperatorPermission,
+  PayrollOperatorPermissionError,
+} from "./roles/capabilityMatrix";
 import { IdempotencyRegistry, createPaymentIdempotencyKey } from "./core/idempotency";
 import { createPayrollProgressEvent } from "./progress";
 import { assertValidPayrollWitness } from "./crypto/proofInputSanitizer";
-import { iterateBatches } from "./batch/paginate";
+import { assertValidPageSize, iterateBatches } from "./batch/paginate";
 import type { BatchPayload } from "./batch/BatchPayloadBuilder";
 import {
   createPayrollReceipt,
@@ -61,6 +65,102 @@ import {
   type DestinationWorkflowValidation,
 } from "./settlement/destination";
 import type { DestinationValidationHook } from "./employees/payoutDestination";
+import {
+  fetchRecipientLockStatus as fetchRecipientLockStatusHelper,
+  evaluateRecipientLockStatus as evaluateRecipientLockStatusHelper,
+  evaluateBatchRecipientLockStatus as evaluateBatchRecipientLockStatusHelper,
+  formatRecipientLockStatus as formatRecipientLockStatusHelper,
+  isRecipientLocked as isRecipientLockedHelper,
+  canRecipientReceivePayout as canRecipientReceivePayoutHelper,
+  type RecipientLockStatus,
+  type RecipientLockReason,
+  type FetchRecipientLockStatusOptions,
+  type RecipientLockReadOptions,
+  type ActivePayrollExecution,
+  type BatchRecipientLockSummary,
+} from "./payroll/recipientLockStatus";
+import {
+  inspectDraftLock as inspectDraftLockHelper,
+  assertDraftLockable as assertDraftLockableHelper,
+  isDraftLockable as isDraftLockableHelper,
+  formatDraftLockInspectionSummary as formatDraftLockInspectionSummaryHelper,
+  createMockDraftLockInspectionResult as createMockDraftLockInspectionResultHelper,
+  DraftLockError,
+  type DraftLockInspectionResult,
+  type DraftLockInspectionOptions,
+  type DraftLockState,
+  type DraftLockErrorCode,
+  type DraftLockBlocker,
+  type DraftLockWarning,
+  type DraftLockWarningCode,
+} from "./draft/draftLockInspection";
+
+export {
+  fetchRecipientLockStatusHelper as fetchRecipientLockStatus,
+  evaluateRecipientLockStatusHelper as evaluateRecipientLockStatus,
+  evaluateBatchRecipientLockStatusHelper as evaluateBatchRecipientLockStatus,
+  formatRecipientLockStatusHelper as formatRecipientLockStatus,
+  isRecipientLockedHelper as isRecipientLocked,
+  canRecipientReceivePayoutHelper as canRecipientReceivePayout,
+  type RecipientLockStatus,
+  type RecipientLockReason,
+  type FetchRecipientLockStatusOptions,
+  type RecipientLockReadOptions,
+  type ActivePayrollExecution,
+  type BatchRecipientLockSummary,
+};
+
+export {
+  inspectDraftLockHelper as inspectDraftLock,
+  assertDraftLockableHelper as assertDraftLockable,
+  isDraftLockableHelper as isDraftLockable,
+  formatDraftLockInspectionSummaryHelper as formatDraftLockInspectionSummary,
+  createMockDraftLockInspectionResultHelper as createMockDraftLockInspectionResult,
+  DraftLockError,
+  type DraftLockInspectionResult,
+  type DraftLockInspectionOptions,
+  type DraftLockState,
+  type DraftLockErrorCode,
+  type DraftLockBlocker,
+  type DraftLockWarning,
+  type DraftLockWarningCode,
+};
+
+import {
+  diagnoseBlockedExecution as diagnoseBlockedExecutionHelper,
+  assertCanExecute as assertCanExecuteHelper,
+  hasExecutionBlocker as hasExecutionBlockerHelper,
+  getDiagnosticsByCategory as getDiagnosticsByCategoryHelper,
+  getFirstRemediation as getFirstRemediationHelper,
+  formatBlockedExecutionReport as formatBlockedExecutionReportHelper,
+  BlockedExecutionError,
+  type BlockedExecutionInput,
+  type BlockedExecutionReport,
+  type BlockedExecutionDiagnostic,
+  type BlockedExecutionReasonCode,
+  type BlockerSeverity,
+  type BlockerCategory,
+  type ExecutionRemediation,
+  type RemediationActionType,
+} from "./payroll/blockedExecutionDiagnostics";
+
+export {
+  diagnoseBlockedExecutionHelper as diagnoseBlockedExecution,
+  assertCanExecuteHelper as assertCanExecute,
+  hasExecutionBlockerHelper as hasExecutionBlocker,
+  getDiagnosticsByCategoryHelper as getDiagnosticsByCategory,
+  getFirstRemediationHelper as getFirstRemediation,
+  formatBlockedExecutionReportHelper as formatBlockedExecutionReport,
+  BlockedExecutionError,
+  type BlockedExecutionInput,
+  type BlockedExecutionReport,
+  type BlockedExecutionDiagnostic,
+  type BlockedExecutionReasonCode,
+  type BlockerSeverity,
+  type BlockerCategory,
+  type ExecutionRemediation,
+  type RemediationActionType,
+};
 
 export {
   submitSequentialPayrollBatches,
@@ -99,6 +199,11 @@ export interface FilterCriteria {
   minAmount: bigint;
 }
 
+export interface PayrollServiceOptions {
+  /** Resolve authoritative role assignments for an operator before payroll submission. */
+  resolveOperatorRoles?: (operatorAddress: string) => Promise<readonly string[]>;
+}
+
 /**
  * PayrollService — API layer for private payroll payments.
  *
@@ -118,7 +223,8 @@ export class PayrollService {
     signer: Keypair | ISigner,
     private readonly network: string = Networks.TESTNET,
     private readonly logger?: SdkLogger,
-    private readonly cache?: ServerCacheAdapter
+    private readonly cache?: ServerCacheAdapter,
+    private readonly options: PayrollServiceOptions = {}
   ) {
     this.signer = toISigner(signer);
   }
@@ -204,6 +310,22 @@ export class PayrollService {
         })
       );
       throw destinationError;
+    }
+
+    if (this.options.resolveOperatorRoles) {
+      try {
+        const operatorAddress = await this.signer.getPublicKey();
+        const operatorRoles = await this.options.resolveOperatorRoles(operatorAddress);
+        assertPayrollOperatorPermission(operatorAddress, operatorRoles, "submit");
+      } catch (error) {
+        if (error instanceof PayrollOperatorPermissionError) throw error;
+        throw new PayrollOperatorPermissionError(
+          "OPERATOR_PERMISSION_LOOKUP_FAILED",
+          "submit",
+          "Unable to verify payroll operator permissions. Check the role registry connection and retry.",
+          error
+        );
+      }
     }
 
     // 2. Generate ZK proof
@@ -316,20 +438,71 @@ export class PayrollService {
    *
    * When `batchSize` is provided, validated entries are processed incrementally
    * in deterministic, order-preserving batches via the batch pagination helper.
-   * Results are returned in the original entry order either way.
+   * Optional progress events report batch lifecycle and cumulative successful
+   * item counts without exposing payment details. Results are returned in the
+   * original entry order either way.
    */
-  async processBatchPayments(entries: unknown[], batchSize?: number): Promise<PaymentResult[]> {
+  async processBatchPayments(
+    entries: unknown[],
+    batchSize?: number,
+    onProgress?: (event: SafeBatchProgressEvent) => void
+  ): Promise<PaymentResult[]> {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PayrollValidation } = require("./core/validation");
     const payload: BatchPayload = PayrollValidation.assertValidBatchPayload(entries);
 
     const results: PaymentResult[] = [];
+    const totalItems = payload.entries.length;
+    assertValidPageSize(batchSize);
+    const totalBatches = totalItems === 0 ? 0 : Math.ceil(totalItems / (batchSize ?? totalItems));
+    let itemsProcessed = 0;
+    const emitProgress = (stage: SafeBatchProgressStage, batchIndex: number, message: string) => {
+      onProgress?.({
+        stage,
+        batchIndex,
+        totalBatches,
+        itemsProcessed,
+        totalItems,
+        percentage:
+          totalItems === 0 ? 100 : Math.min(100, Math.round((itemsProcessed / totalItems) * 100)),
+        message,
+        timestamp: new Date().toISOString(),
+      });
+    };
+
+    emitProgress(
+      "validating",
+      0,
+      `Validating ${totalItems} payroll item(s) across ${totalBatches} batch(es)...`
+    );
     for (const batch of iterateBatches(payload.entries, batchSize)) {
-      for (const entry of batch.items) {
-        const res = await this.processPayment(entry);
-        results.push(res);
+      emitProgress(
+        "batch_starting",
+        batch.index,
+        `Starting batch ${batch.index + 1} of ${totalBatches}...`
+      );
+      emitProgress(
+        "batch_submitting",
+        batch.index,
+        `Processing batch ${batch.index + 1} of ${totalBatches}...`
+      );
+      try {
+        for (const entry of batch.items) {
+          const res = await this.processPayment(entry);
+          results.push(res);
+          itemsProcessed++;
+        }
+      } catch (error) {
+        emitProgress("failed", batch.index, `Batch ${batch.index + 1} of ${totalBatches} failed.`);
+        throw error;
       }
+      emitProgress(
+        "batch_completed",
+        batch.index,
+        `Completed batch ${batch.index + 1} of ${totalBatches}.`
+      );
     }
+    emitProgress("completed", totalBatches - 1, `Completed all ${totalBatches} payroll batch(es).`);
     return results;
   }
 
@@ -623,5 +796,163 @@ export class PayrollService {
    */
   static async validateDestination(value: unknown): Promise<DestinationWorkflowValidation> {
     return validatePaymentDestination(value);
+  }
+
+  /**
+   * Reads the on-chain lock status for a payout recipient (#512).
+   *
+   * Queries the contract to check whether the recipient is currently locked
+   * by an active payroll execution. Returns typed, UI-safe status with
+   * masked recipient identifiers and safe defaults on error.
+   *
+   * @param recipient - Recipient Stellar address or employee identifier
+   * @param employer - Employer/company Stellar address
+   * @param options - Query options (network, requestId, redact)
+   */
+  async getRecipientLockStatus(
+    recipient: string,
+    employer: string,
+    options?: Partial<FetchRecipientLockStatusOptions>
+  ): Promise<RecipientLockStatus> {
+    return fetchRecipientLockStatusHelper(this.contractWrapper, recipient, employer, {
+      signer: this.signer,
+      network: this.network,
+      ...options,
+    });
+  }
+
+  /**
+   * Evaluates whether a recipient is locked across active in-flight payroll executions (#512).
+   *
+   * @param recipient - Recipient identifier
+   * @param activeExecutions - Array of in-flight payroll executions
+   * @param options - Evaluation options
+   */
+  evaluateRecipientLock(
+    recipient: string,
+    activeExecutions: ActivePayrollExecution[],
+    options?: RecipientLockReadOptions
+  ): RecipientLockStatus {
+    return evaluateRecipientLockStatusHelper(recipient, activeExecutions, options);
+  }
+
+  /**
+   * Static helper: Evaluates recipient lock status without a service instance (#512).
+   */
+  static evaluateRecipientLock(
+    recipient: string,
+    activeExecutions: ActivePayrollExecution[],
+    options?: RecipientLockReadOptions
+  ): RecipientLockStatus {
+    return evaluateRecipientLockStatusHelper(recipient, activeExecutions, options);
+  }
+
+  /**
+   * Static helper: Evaluates lock statuses for a batch of recipients (#512).
+   */
+  static evaluateBatchRecipientLock(
+    recipients: string[],
+    activeExecutions: ActivePayrollExecution[],
+    options?: RecipientLockReadOptions
+  ): BatchRecipientLockSummary {
+    return evaluateBatchRecipientLockStatusHelper(recipients, activeExecutions, options);
+  }
+
+  /**
+   * Static helper: Formats a recipient lock status into a single human-readable line (#512).
+   */
+  static formatRecipientLockStatus(status: RecipientLockStatus): string {
+    return formatRecipientLockStatusHelper(status);
+  }
+
+  /**
+   * Static helper: Checks whether a recipient is locked (#512).
+   */
+  static isRecipientLocked(
+    statusOrRecipient: RecipientLockStatus | { isLocked: boolean }
+  ): boolean {
+    return isRecipientLockedHelper(statusOrRecipient);
+  }
+
+  /**
+   * Static helper: Checks whether a recipient is clear to receive a payout (#512).
+   */
+  static canRecipientReceivePayout(
+    statusOrRecipient: RecipientLockStatus | { isLocked: boolean; canReceivePayout?: boolean }
+  ): boolean {
+    return canRecipientReceivePayoutHelper(statusOrRecipient);
+  }
+
+  /**
+   * Inspects a payroll draft for lock readiness and operational lock state (#537).
+   *
+   * @param draft - Payroll draft, DraftBuilder, or entry array
+   * @param options - Inspection options
+   */
+  inspectDraftLock(
+    draft: unknown,
+    options?: DraftLockInspectionOptions
+  ): DraftLockInspectionResult {
+    return inspectDraftLockHelper(draft, options);
+  }
+
+  /**
+   * Static helper: Inspects a payroll draft for lock readiness (#537).
+   */
+  static inspectDraftLock(
+    draft: unknown,
+    options?: DraftLockInspectionOptions
+  ): DraftLockInspectionResult {
+    return inspectDraftLockHelper(draft, options);
+  }
+
+  /**
+   * Asserts that a draft is clear to be locked and submitted, throwing DraftLockError if not (#537).
+   */
+  assertDraftLockable(draft: unknown, options?: DraftLockInspectionOptions): void {
+    assertDraftLockableHelper(draft, options);
+  }
+
+  /**
+   * Static helper: Asserts that a draft is clear to be locked and submitted (#537).
+   */
+  static assertDraftLockable(draft: unknown, options?: DraftLockInspectionOptions): void {
+    assertDraftLockableHelper(draft, options);
+  }
+  /**
+   * Evaluates an execution payload against all protocol, treasury, proof,
+   * recipient, and governance constraints (#605).
+   */
+  diagnoseBlockedExecution(input: BlockedExecutionInput): BlockedExecutionReport {
+    return diagnoseBlockedExecutionHelper(input);
+  }
+
+  /**
+   * Static helper: Evaluates an execution payload for blocked execution diagnostics (#605).
+   */
+  static diagnoseBlockedExecution(input: BlockedExecutionInput): BlockedExecutionReport {
+    return diagnoseBlockedExecutionHelper(input);
+  }
+
+  /**
+   * Asserts that execution is not blocked. Throws BlockedExecutionError if blocked (#605).
+   */
+  assertCanExecute(reportOrInput: BlockedExecutionReport | BlockedExecutionInput): void {
+    const report =
+      "canExecute" in reportOrInput
+        ? (reportOrInput as BlockedExecutionReport)
+        : diagnoseBlockedExecutionHelper(reportOrInput as BlockedExecutionInput);
+    assertCanExecuteHelper(report);
+  }
+
+  /**
+   * Static helper: Asserts that execution is not blocked (#605).
+   */
+  static assertCanExecute(reportOrInput: BlockedExecutionReport | BlockedExecutionInput): void {
+    const report =
+      "canExecute" in reportOrInput
+        ? (reportOrInput as BlockedExecutionReport)
+        : diagnoseBlockedExecutionHelper(reportOrInput as BlockedExecutionInput);
+    assertCanExecuteHelper(report);
   }
 }

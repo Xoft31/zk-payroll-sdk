@@ -146,6 +146,11 @@ const SDK_OPERATIONS: SdkOperationCapability[] = [
     requiredCapabilities: [],
     requiresBackend: false,
   },
+  {
+    operation: "detectDuplicatePayment",
+    requiredCapabilities: [],
+    requiresBackend: false,
+  },
 ];
 
 /**

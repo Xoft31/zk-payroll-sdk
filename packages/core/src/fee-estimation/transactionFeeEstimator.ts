@@ -27,6 +27,7 @@ import {
 } from "../core/errors";
 import { RunIdentifier } from "../core/run-identifier";
 import { sanitizeSimulationDetail } from "../simulation/resultParser";
+import { assertFeeWithinCeiling } from "./feeCeiling";
 import { TransactionFeeEstimate, TransactionFeeEstimatorOptions } from "./types";
 
 /** One basis point is 0.01% (10000 bps = 100%). */
@@ -48,6 +49,8 @@ export const FeeEstimationErrorCode = {
   INVALID_TRANSACTION: "FEE_ESTIMATION_INVALID_TRANSACTION",
   /** The `bufferBps` option is not an integer in `[0, 10000]`. */
   INVALID_BUFFER: "FEE_ESTIMATION_INVALID_BUFFER",
+  /** The `feeCeiling` option is not a positive integer number of stroops. */
+  INVALID_CEILING: "FEE_ESTIMATION_INVALID_CEILING",
 } as const;
 
 export type FeeEstimationErrorCodeType =
@@ -90,6 +93,7 @@ export class TransactionFeeEstimator {
     const requestId =
       this.options.requestId ?? RunIdentifier.generateRequestId("estimate_transaction_fee");
     const bufferBps = resolveBufferBps(this.options.bufferBps);
+    const feeCeiling = resolveFeeCeiling(this.options.feeCeiling);
 
     let simulation: rpc.Api.SimulateTransactionResponse;
     try {
@@ -134,7 +138,8 @@ export class TransactionFeeEstimator {
       tx.operations.length,
       bufferBps,
       true,
-      note
+      note,
+      feeCeiling
     );
   }
 }
@@ -184,7 +189,9 @@ export function estimatePreparedTransactionFee(
     resourceFee,
     tx.operations.length,
     resolveBufferBps(options.bufferBps),
-    true
+    true,
+    undefined,
+    resolveFeeCeiling(options.feeCeiling)
   );
 }
 
@@ -239,6 +246,21 @@ function resolveBufferBps(bufferBps: number | undefined): number {
   return bufferBps;
 }
 
+/** Validate the optional fee ceiling option (#524). */
+function resolveFeeCeiling(feeCeiling: bigint | undefined): bigint | undefined {
+  if (feeCeiling === undefined) {
+    return undefined;
+  }
+  if (typeof feeCeiling !== "bigint" || feeCeiling <= 0n) {
+    throw new ValidationError(
+      "feeCeiling must be a positive integer number of stroops.",
+      "feeCeiling",
+      FeeEstimationErrorCode.INVALID_CEILING
+    );
+  }
+  return feeCeiling;
+}
+
 /** Parse a non-negative integer-like value into a bigint, or return null. */
 function readNonNegativeBigInt(value: unknown): bigint | null {
   if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
@@ -282,11 +304,17 @@ function buildEstimate(
   operationCount: number,
   bufferBps: number,
   exact: boolean,
-  note?: string
+  note?: string,
+  feeCeiling?: bigint
 ): TransactionFeeEstimate {
   const subtotal = baseFee + resourceFee;
   const bufferFee = bufferBps > 0 ? (subtotal * BigInt(bufferBps)) / BPS_DENOMINATOR : 0n;
   const totalFee = subtotal + bufferFee;
+
+  // Gate the buffered total against the caller's ceiling (#524) before the
+  // estimate is ever reported, so an over-ceiling fee fails here — prior to
+  // signing or broadcasting — with a sanitized, fee-only message.
+  assertFeeWithinCeiling(totalFee, feeCeiling);
 
   return {
     baseFee,

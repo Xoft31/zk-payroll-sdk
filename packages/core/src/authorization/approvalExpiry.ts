@@ -30,6 +30,12 @@ export interface ApprovalExpiryStatus {
 export const DEFAULT_EXPIRING_SOON_THRESHOLD_MS = 60 * 60 * 1000;
 
 /**
+ * Default grace period after expiry during which an expired approval may
+ * still be surfaced as actionable (e.g. for late-arriving signatures).
+ */
+export const DEFAULT_EXPIRY_GRACE_PERIOD_MS = 0;
+
+/**
  * Classifies an authorization request's expiry state as of `now`.
  *
  * - "missing": the request has no `expiresAt` set at all (some policies —
@@ -51,6 +57,30 @@ export function getApprovalExpiryState(
 ): ApprovalExpiryState {
   if (request.expiresAt === undefined) {
     return "missing";
+  }
+
+  if (!Number.isFinite(request.expiresAt)) {
+    throw new Error(
+      `Invalid expiresAt on authorization request: expected a finite epoch ms value, received ${String(
+        request.expiresAt
+      )}`
+    );
+  }
+
+  if (!Number.isFinite(now)) {
+    throw new Error(
+      `Invalid "now" value passed to getApprovalExpiryState: expected a finite epoch ms value, received ${String(
+        now
+      )}`
+    );
+  }
+
+  if (!Number.isFinite(expiringSoonThresholdMs) || expiringSoonThresholdMs < 0) {
+    throw new Error(
+      `Invalid expiringSoonThresholdMs: expected a non-negative finite number, received ${String(
+        expiringSoonThresholdMs
+      )}`
+    );
   }
 
   const remainingMs = request.expiresAt - now;
@@ -117,6 +147,72 @@ export function formatApprovalExpiry(
     ...meta,
     remainingMs: request.expiresAt !== undefined ? request.expiresAt - now : undefined,
   };
+}
+
+/**
+ * Returns true when an authorization request's approval window has expired
+ * (i.e. it can no longer be signed). Requests without an `expiresAt` never
+ * expire and therefore return false.
+ *
+ * @param request - The authorization request to check.
+ * @param now - Current time in epoch ms (defaults to `Date.now()`).
+ */
+export function isApprovalExpired(
+  request: Pick<AuthorizationRequest, "expiresAt">,
+  now: number = Date.now()
+): boolean {
+  return getApprovalExpiryState(request, now) === "expired";
+}
+
+/**
+ * Asserts that an authorization request's approval window is still open,
+ * throwing an actionable error when it has expired. Intended to guard
+ * signing/approval entry points so callers fail fast with a clear message.
+ *
+ * @param request - The authorization request to validate.
+ * @param now - Current time in epoch ms (defaults to `Date.now()`).
+ */
+export function assertApprovalNotExpired(
+  request: Pick<AuthorizationRequest, "expiresAt">,
+  now: number = Date.now()
+): void {
+  if (request.expiresAt === undefined) {
+    return;
+  }
+
+  const state = getApprovalExpiryState(request, now);
+  if (state === "expired") {
+    const elapsedMs = now - request.expiresAt;
+    throw new Error(
+      `Approval window has expired: request expired ${formatDuration(elapsedMs)} ago (expiresAt=${request.expiresAt}, now=${now})`
+    );
+  }
+}
+
+/**
+ * Formats a non-negative duration in ms into a short human-readable string,
+ * e.g. "2h", "45m", "30s".
+ */
+function formatDuration(ms: number): string {
+  const absMs = Math.max(0, Math.floor(ms));
+  const seconds = Math.floor(absMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    return `${days}d`;
+  }
+  if (hours > 0) {
+    return `${hours}h`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+  if (seconds > 0) {
+    return `${seconds}s`;
+  }
+  return "<1s";
 }
 
 /**

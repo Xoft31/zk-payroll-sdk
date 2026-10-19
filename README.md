@@ -49,7 +49,7 @@ await service.processPayment(
 
 ## Features
 
-- **Typed Contract Clients**: Fully typed client wrappers for PayrollRegistry, SalaryCommitment, ProofVerifier, PaymentExecutor, and AuditHold contracts.
+- **Typed Contract Clients**: Fully typed client wrappers for PayrollRegistry, SalaryCommitment, ProofVerifier, PaymentExecutor, PreflightClient, and AuditHold contracts.
 - **ZK Proof Generation**: Client-side proof generation using snarkjs for privacy.
 - **Caching**: Built-in caching for proofs and circuit artifacts.
 - **Error Handling**: Robust error typing and management.
@@ -78,6 +78,29 @@ apply to `iteratePayrollPeriods()` / `collectPayrollPeriods()`.
 `validatePayoutDestination()` validates Stellar account and muxed-account
 destinations without including rejected values in error messages. The same
 validation runs automatically before `PayrollService` submits a payment.
+
+### Safe Payout Batch Chunking
+
+`chunkPayoutBatches()` splits raw payout entries into validated batches according to a configured maximum batch size (safety limit). This helps developers ensure that large payroll runs are safely grouped before processing or signing.
+
+```typescript
+import { chunkPayoutBatches } from "@zk-payroll/core";
+
+const { chunks, errors } = chunkPayoutBatches(entries, { maxBatchSize: 100 });
+
+if (errors.length > 0) {
+  // validation failed before chunking.
+  // errors are privacy-safe and never leak sensitive values.
+  console.error("Batch validation failed", errors);
+} else {
+  // process the valid chunks
+  for (const chunk of chunks) {
+    await processBatch(chunk);
+  }
+}
+```
+
+The chunking helper validates all entries first, returning structured `BatchValidationError` objects if any recipient, amount, or asset is invalid. If validation fails, no chunks are produced. Error messages are actionable but carefully avoid echoing sensitive values like amounts.
 
 ### Resuming an interrupted batch submission
 
@@ -203,6 +226,172 @@ array indexes for per-employee rule sets, `assertWithholdingConfig()` throws a
 typed `WithholdingConfigError` when a hard gate is needed, and
 `PayrollService.validateWithholdingConfig()` exposes the same check as an
 instance and static helper.
+
+## Audit Grant Scope Reader
+
+Read the **effective** audit access scope for an auditor, not just the scope that was last written to disk (`#497`). Auditors accumulate grants over time — a `read-only` window, a later `full-audit` grant, one that quietly expired, one an admin revoked. `readEffectiveAuditGrantScope()` folds every grant into one typed answer so a payroll workflow never hands departmental breakdowns to a stale grant, and never blocks a legitimate auditor because it read the wrong record.
+
+- **Fail-Closed Scope Resolution**: Reports the widest scope among grants that are **live** at the reference time — a lapsed `full-audit` grant can never widen current access, and `scope` is `null` when nothing is live.
+- **Typed Lifecycle State**: Per-grant `"active" | "expired" | "revoked"` plus an effective `"active" | "expired" | "revoked" | "none"` state, with expiry ranked above revocation so a lapsed grant stays recoverable.
+- **Privacy Guaranteed**: The report is metadata-only — view-key tokens, secret keys, salaries, and employee records are never copied through, and unknown fields on the source record are dropped. Every message masks addresses (`GBS***JHR`) and is safe to log verbatim.
+- **Actionable Errors**: Coded `ValidationError`s (`AUDIT_GRANT_SCOPE_INVALID`, `AUDIT_GRANT_LIFECYCLE_INVALID`, …) name the offending field path without echoing payloads or payroll values.
+
+```typescript
+import {
+  readEffectiveAuditGrantScope,
+  auditScopeSatisfies,
+} from "@zk-payroll/core";
+
+const report = readEffectiveAuditGrantScope(persistedGrants);
+
+if (!report.allGranteesActive) {
+  // Privacy-safe: grantee addresses are masked.
+  console.warn(report.message);
+  // e.g. "1 of 2 grantee(s) have no live audit access: GBS***JHR"
+}
+
+for (const entry of report.grantees) {
+  console.log(entry.redactedGrantee, entry.scope, entry.state);
+  // e.g. "GBS***JHR" "read-only" "active"
+
+  // A null scope (lapsed or fully revoked) never satisfies a requirement.
+  if (!auditScopeSatisfies(entry.scope, "full-audit")) {
+    console.log(`Limited to ${entry.scope ?? "no access"} (${entry.state})`);
+    continue;
+  }
+
+  // Safe to include departmental breakdowns for this reviewer.
+  await buildSelectiveDisclosurePackage(entry.grants);
+}
+```
+
+## Payroll Recipient Lock Status Reader
+
+Expose whether a payout recipient is locked because of an active payroll execution (`#512`). This strengthens operational workflows by preventing duplicate payouts, race conditions, and double-settlement during in-flight batch execution while keeping private salary and employee data protected.
+
+- **Privacy Guaranteed**: Private compensation and salary figures are never part of lock evaluations or messages. Recipient addresses and internal payroll identifiers are automatically masked (`GA2C...6E67`, `pay...-01`) for safe logging and UI display.
+- **Contract & Offline Evaluation**: Query live on-chain lock status via `fetchRecipientLockStatus()` / `PayrollService#getRecipientLockStatus()`, or evaluate offline in-flight state via `evaluateRecipientLockStatus()` / `evaluateBatchRecipientLockStatus()`.
+- **UI & Dashboard Safe**: Formatted labels (`formatRecipientLockStatus()`) provide single-line status summaries with status badges (`🔒 LOCKED` / `🔓 UNLOCKED`).
+
+```typescript
+import {
+  fetchRecipientLockStatus,
+  evaluateRecipientLockStatus,
+  evaluateBatchRecipientLockStatus,
+  formatRecipientLockStatus,
+  isRecipientLocked,
+  PayrollService,
+} from "@zk-payroll/core";
+
+// 1. Query on-chain lock status from contract
+const status = await payrollService.getRecipientLockStatus(recipientAddress, employerAddress);
+
+if (status.isLocked) {
+  // Recipient is actively locked in an in-flight payroll run
+  console.log(formatRecipientLockStatus(status));
+  // e.g. "Recipient GA2C...6E67: 🔒 LOCKED (active_payroll_execution in run pay...-01 since 2026-09-29T12:00:00.000Z)"
+} else {
+  console.log("Safe to proceed with payout:", status.canReceivePayout);
+}
+
+// 2. Pure offline evaluation across active in-flight executions
+const activeExecutions = [
+  {
+    payrollId: "batch-run-2024-09",
+    status: "executing",
+    recipients: ["GA2C5RFPE6GCKMY3Z4DC6NOURMDRYZ3UMDVQ4N5ACFBPQ4E3Y3376E67"],
+    lockedAt: Date.now() - 10 * 60 * 1000,
+  },
+];
+
+const evalStatus = evaluateRecipientLockStatus(recipientAddress, activeExecutions, {
+  lockTimeoutMs: 60 * 60 * 1000, // 1 hour timeout
+});
+
+// 3. Batch evaluation for pre-flight payroll checks
+const batchSummary = evaluateBatchRecipientLockStatus(
+  ["GA2C...6E67", "GBBD...7WHF"],
+  activeExecutions
+);
+console.log(`Checked ${batchSummary.totalChecked} recipients: ${batchSummary.lockedCount} locked.`);
+```
+
+## Payroll Draft Lock Inspection Helper
+
+Inspect payroll draft lock readiness and operational lock state before submission or settlement (`#537`). Evaluates whether a draft can be safely locked, whether it is already locked or expired, whether any recipients are locked by in-flight active payroll executions, and whether draft checksums and authorizer requirements are met.
+
+- **Privacy Guaranteed**: Salary amounts and employee compensation figures are never exposed in blocker messages, warnings, or summaries. Recipient addresses and draft labels are automatically masked (`GA2C...6E67`, `Eng...oll`).
+- **Comprehensive Blocker Detection**: Validates empty drafts, duplicate recipients, expired locks, authorizer permissions, checksum integrity, and cross-checks in-flight active executions for recipient locks.
+- **Fluent & Service Integration**: Available via `inspectDraftLock()`, `assertDraftLockable()`, `draftBuilder.inspectLock()`, or `PayrollService#inspectDraftLock()`.
+
+```typescript
+import {
+  DraftBuilder,
+  inspectDraftLock,
+  assertDraftLockable,
+  formatDraftLockInspectionSummary,
+} from "@zk-payroll/core";
+
+// 1. Build and inspect a draft before locking
+const builder = new DraftBuilder(undefined, "March Payroll")
+  .add({ recipientId: "GA2C5RFPE6GCKMY3Z4DC6NOURMDRYZ3UMDVQ4N5ACFBPQ4E3Y3376E67", amount: "1000", asset: "native" })
+  .add({ recipientId: "GBBDU6DDT5I7VO6JCT262L7X3T32NZZ6XUMG575U5K7F5T27YJ3W7WHF", amount: "2500", asset: "native" });
+
+const inspection = builder.inspectLock({
+  activeExecutions: inFlightRuns,
+  authorizer: "GADMIN...",
+  allowedAuthorizers: ["GADMIN..."],
+});
+
+console.log(inspection.summary);
+// e.g. "Draft (Mar...oll): ✅ LOCK READY | 2 entries | 2 recipients | assets: native"
+
+if (!inspection.canLock) {
+  // Actionable, privacy-safe blockers
+  for (const blocker of inspection.blockers) {
+    console.error(`[${blocker.code}] ${blocker.message}`);
+  }
+} else {
+  // Safe to lock and submit
+  builder.assertLockable();
+}
+```
+
+## SDK Blocked Execution Diagnostics
+
+Pure, privacy-safe diagnostics engine for identifying, categorizing, and explaining why a payroll execution is blocked prior to on-chain submission (`#605`).
+
+- **Zero Information Leakage**: Never exposes individual compensation numbers, private keys, or unmasked recipient credentials. Only aggregate totals, masked identifiers (`GA2C...6E67`, `EMP***1`), and operational metadata are emitted.
+- **Comprehensive Blocker Detection**: Evaluates treasury reserves & buffers, ZK proof freshness and verification, contract pause states, batch capacity limits, approval governance, wallet rotation cooldowns, recipient eligibility, and session auth nonces.
+- **Actionable Remediation**: Every blocker and warning provides a structured remediation with action types (`fund_treasury`, `generate_proof`, `split_batch`, `reauthenticate`, `resolve_recipients`, etc.) and suggested resolution steps.
+- **Fluent & Service Integration**: Available via `diagnoseBlockedExecution()`, `assertCanExecute()`, `formatBlockedExecutionReport()`, or `PayrollService#diagnoseBlockedExecution()`.
+
+```typescript
+import {
+  diagnoseBlockedExecution,
+  assertCanExecute,
+  formatBlockedExecutionReport,
+} from "@zk-payroll/core";
+
+const report = diagnoseBlockedExecution({
+  runId: "run_001",
+  totalAmount: 50_000,
+  treasuryBalance: 20_000, // Shortfall: $30,000
+  hasProof: false,         // Missing ZK proof
+});
+
+console.log(formatBlockedExecutionReport(report));
+
+if (report.isBlocked) {
+  console.log(`Execution blocked by ${report.blockerCount} issue(s):`);
+  for (const blocker of report.blockers) {
+    console.log(`[${blocker.code}] ${blocker.message}`);
+    console.log(` -> Action: ${blocker.remediation.label} (${blocker.remediation.suggestedAction})`);
+  }
+} else {
+  assertCanExecute(report);
+}
+```
 
 ## Event Stream Deduplication
 
@@ -341,6 +530,49 @@ non-Soroban/empty transactions and a `ContractExecutionError` with
 `SIMULATION_FAILED` for rejected simulations — and never echo rejected
 destination, amount, or proof values.
 
+## Transaction fee ceiling
+
+Gate an estimate against an explicit maximum **before** anything is signed or
+submitted. Pass `feeCeiling` (stroops) to any estimation entry point — the
+cap is applied to the total the transaction would actually carry, including
+the safety buffer — or run the validator yourself for a non-throwing
+pre-flight check.
+
+```typescript
+import { validateFeeCeiling, TransactionFeeCeilingError } from "@zk-payroll/core";
+
+// Fail fast when the simulated total (base + resource + buffer) is too expensive:
+const estimate = await contractWrapper.estimatePrivatePayFee(
+  recipient,
+  amount,
+  asset,
+  proof,
+  sourcePublicKey,
+  undefined,
+  { bufferBps: 1_000, feeCeiling: 5_000n } // throws TransactionFeeCeilingError
+);
+
+// Or check without throwing:
+const check = validateFeeCeiling(estimate.totalFee, 5_000n, { warnBps: 8_000 });
+if (!check.ok) {
+  console.error(check.code, check.message); // safe to log
+} else if (check.state === "approaching_ceiling") {
+  console.warn(check.warning); // 80%+ of the ceiling already committed
+}
+```
+
+`validateFeeCeiling()` returns `{ ok: true, state, fee, ceiling, headroom,
+utilizationBps, warning }` or `{ ok: false, state, code, message }`. States
+are `within_ceiling`, `approaching_ceiling` (default ≥ 80% of the ceiling,
+tunable via `warnBps`, `0` disables), `exceeds_ceiling`, and `invalid`
+(malformed fee, non-positive ceiling, or an out-of-range `warnBps`).
+`assertFeeWithinCeiling()` throws a typed `TransactionFeeCeilingError`,
+`validateTransactionFeeCeiling()` applies the same gate to a
+`TransactionFeeEstimate`, and `isFeeWithinCeiling()` is the boolean shortcut.
+Messages carry fee figures and an optional operation label only — never
+recipients, payroll amounts, or proofs — and a malformed `feeCeiling` option
+surfaces as a `ValidationError` (`FEE_ESTIMATION_INVALID_CEILING`).
+
 ## Request identifier propagation
 
 Pass a `requestId` to correlate one payroll operation across transaction
@@ -410,6 +642,126 @@ checks the receipt and payroll identifiers, settled status, transaction
 reference, and metadata digest — returning an explicit result with a stable
 error code and a sanitized, actionable message that never echoes rejected
 values. The display receipt ID in the result is redacted for safe logging.
+
+## Payroll run amendments
+
+The SDK provides `createPayrollRunAmendment`, `inspectPayrollRunAmendment`, `validatePayrollRunAmendment`, and `authorizePayrollRunAmendment` to support controlled, privacy-preserving modifications to active payroll runs before settlement:
+
+- **Create & Diff**: Compares existing and proposed commitments, deriving deterministic diffs (`added`, `removed`, `modified`) and aggregate inspection summaries.
+- **Privacy Guarantees**: Raw compensation amounts and recipient addresses are masked in public descriptions and omitted from validation error messages. Reasons are restricted to lowercase operational codes (e.g. `retroactive_adjustment`, `hours_correction`) to prevent accidental PII/salary leakage.
+- **Authorization Lifecycle**: Enforces authorizer role checks, positive revision increments, duplicate recipient detection, and terminal state safeguards.
+
+```typescript
+import {
+  createPayrollRunAmendment,
+  inspectPayrollRunAmendment,
+  validatePayrollRunAmendment,
+  authorizePayrollRunAmendment,
+} from "@zk-payroll/core";
+
+// 1. Create a proposed amendment run with calculated diffs
+const amendment = createPayrollRunAmendment({
+  payrollId: "pay-2026-09-01",
+  revision: 2,
+  authorizer: "GADMIN...",
+  reason: "retroactive_adjustment",
+  currentCommitments: [{ recipient: "G_ALICE...", amount: 5000n, asset: "USDC" }],
+  proposedCommitments: [{ recipient: "G_ALICE...", amount: 5500n, asset: "USDC" }],
+});
+
+// 2. Inspect aggregate diffs and risk level (privacy-safe, no exposed salary data)
+const inspection = inspectPayrollRunAmendment(amendment);
+console.log(inspection.redactedDescription);
+// "Amendment (rev 2) for payroll pay...-01: 0 added, 1 modified, 0 removed across asset(s) USDC."
+
+// 3. Validate against operational constraints and allowed signers
+const validation = validatePayrollRunAmendment(amendment, {
+  allowedAuthorizers: ["GADMIN..."],
+  currentPayrollStatus: "draft",
+});
+
+if (validation.ok) {
+  // 4. Authorize for contract submission
+  const authorized = authorizePayrollRunAmendment(amendment, "GADMIN...");
+}
+```
+..
+
+## Signed payroll instruction builder
+
+### Payroll owner transfer safety
+
+The authorization role-transfer helper bounds nominee acceptance windows to 5 minutes–30 days and requires valid signer addresses and safe epoch-millisecond timestamps. Transfer reasons are restricted to short lowercase operational codes; free text is rejected so employee or compensation details cannot leak through transfer summaries or errors. Treat `finalized` as the signal to submit the contract role assignment; `pending`, `accepted`, cancelled, and expired proposals must not change the on-chain owner.
+
+`SignedPayrollInstructionBuilder` composes a payroll request, deterministically
+serializes it (the same encoder used for on-chain command payloads), and
+produces a signed, auditable instruction — independent of transaction
+assembly and submission. It's the right building block when a payroll
+instruction needs to be authorized, persisted, or handed to an approver
+*before* a Soroban transaction exists.
+
+```typescript
+import {
+  SignedPayrollInstructionBuilder,
+  KeypairInstructionSigner,
+  verifySignedPayrollInstruction,
+  describeSignedPayrollInstruction,
+} from "@zk-payroll/core";
+
+const instruction = await new SignedPayrollInstructionBuilder()
+  .add({ recipient: "GABC...", amount: 1000n, asset: "native" })
+  .withContext({ network: "testnet", contractId: "CABC..." })
+  .sign(new KeypairInstructionSigner(employerKeypair));
+
+// Safe to log or display — never contains recipient/amount values.
+console.log(describeSignedPayrollInstruction(instruction));
+
+// Independently verify integrity (unmodified since signing) and authenticity
+// (the signature matches signerPublicKey) before acting on the instruction.
+const check = await verifySignedPayrollInstruction(instruction);
+if (!check.ok) {
+  console.error(check.code, check.message); // safe to log
+}
+```
+
+`sign()` throws a typed `PayrollInstructionError` for empty or invalid
+entries, an unavailable signer, or a signing failure — messages carry only
+stable codes and field/index references, never recipient, amount, or asset
+values. Any object implementing `getPublicKey()` / `signPayload()` can be
+used as the signer (`KeypairInstructionSigner` adapts a Stellar `Keypair`),
+so hardware wallets, browser extensions, or KMS-backed signers work the same
+way as backend keypairs.
+
+## SDK / contract revision compatibility warnings
+
+`checkConnectedContractCompatibility()` warns when the connected payroll
+contract's revision falls outside the range this SDK version has been built
+and tested against (`SDK_SUPPORTED_CONTRACT_REVISION_RANGE`). It's a
+read-only, unsigned check — safe to run at startup or before a payroll run —
+and never throws: RPC failures, an invalid contract ID, or a contract that
+doesn't expose a revision method all resolve to `status: "unknown"` with a
+stable code instead of crashing the workflow.
+
+```typescript
+import { checkConnectedContractCompatibility } from "@zk-payroll/core";
+
+const warning = await checkConnectedContractCompatibility({ server, contractId });
+
+if (!warning.compatible) {
+  console.warn(warning.code, warning.message); // safe to log — no payroll values
+}
+```
+
+States: `compatible`, `outdated` (contract revision below the SDK's minimum
+— upgrade the contract or use an older SDK), `ahead` (contract revision
+above the SDK's maximum — upgrade the SDK), and `unknown` (revision could
+not be determined; treat as unverified rather than a hard failure). Only
+integer revision numbers are read from or reported by this check — never
+recipient, amount, or employee data.
+
+Use `checkContractRevisionCompatibility(revision, range?)` directly when you
+already have the revision (e.g. from your own contract read) and just need
+the comparison, without an RPC round-trip.
 
 ## Explicit Operation Result Types
 
@@ -642,11 +994,33 @@ const scheduled = await client.schedule(
 );
 console.log("Payment ID:", scheduled.paymentId);
 
-// Cancel a scheduled payment
-await client.cancel(scheduled.paymentId, signer);
+// Cancel a scheduled payment with an optional reason code
+await client.cancel(scheduled.paymentId, signer, "insufficient_funds");
 
 // Get pending payments
 const payments = await client.getPendingPayments("G...", 0n, 20, signer);
+```
+
+### PreflightClient
+
+Expose the contract preflight response as typed, actionable execution blockers. This strengthens a practical payroll workflow while keeping private salary and employee data protected.
+
+```typescript
+import { PreflightClient } from "@zk-payroll/sdk";
+
+const client = new PreflightClient(server, "CCONTRACT_ID...");
+
+// Validate an execution via dry-run simulation
+const result = await client.preflightExecute(
+  { recipient: "G...", amount: 1000n, asset: "native", memo: "salary" },
+  signer.publicKey() // Can check without signing
+);
+
+if (!result.canProceed) {
+  console.error("Dry run failed:", result.findings);
+} else {
+  console.log("Safe to execute!");
+}
 ```
 
 ### AuditHoldClient
@@ -735,12 +1109,52 @@ See [Setup Guide](./docs/setup.md) for `.env` examples and local quick-start.
 `redactSensitive` – even when `STELLAR_SECRET_KEY` is set, the secret is
 excluded from logs, exports, telemetry, and events.
 
+## Safe Credential and Payroll Data Handling
+
+Applications interacting with private zero-knowledge payroll contracts handle highly sensitive assets: Stellar secret keys (`S...`), zero-knowledge witness secrets, private viewing keys, and confidential employee compensation amounts.
+
+The SDK includes dedicated safeguards to prevent credentials and private payroll data from leaking into persistent logs, unencrypted storage, or public telemetry:
+
+- **Runtime Credential Scanning**: `validateSafeCredentialUsage()` and `assertSafeCredentialUsage()` detect accidentally exposed secret seeds, private hex keys, seed phrases, and plaintext salaries before payloads are logged or transmitted.
+- **Deep Sanitization for Persistence**: `sanitizeForPersistence()` deeply walks complex payloads and strips or masks credentials and salary records before database persistence or caching.
+- **Safe Credential Masking**: `maskCredential()` partially masks secret seeds (e.g. `S****...****XYZ`) for safe administrative display without exposing the secret body.
+- **Leak Auditing**: `SafeCredentialAuditor` tracks operations across batch jobs to guarantee no secret leakage occurred.
+
+```typescript
+import {
+  validateSafeCredentialUsage,
+  assertSafeCredentialUsage,
+  sanitizeForPersistence,
+  maskCredential,
+  SafeCredentialAuditor,
+} from "@zk-payroll/core";
+
+// 1. Assert payload safety before logging or submitting
+assertSafeCredentialUsage(payload, { context: "logging" });
+
+// 2. Deeply sanitize before storing to database or local cache
+const safeRecord = sanitizeForPersistence(payrollDraft, {
+  removeSecrets: true,
+  redactCompensation: true,
+  maskIdentifiers: true,
+});
+await db.collection("payroll_drafts").insertOne(safeRecord);
+
+// 3. Mask keys safely for audit or administrative logs
+const displayKey = maskCredential(process.env.STELLAR_SECRET_KEY);
+console.log(`Configured signer: ${displayKey}`);
+```
+
+For complete architectural patterns, threat models, and an incident response checklist, see the [Safe Credential Handling Guide](./docs/SAFE_CREDENTIAL_HANDLING.md).
+
 ## Documentation
 
 - [Setup Guide](./docs/setup.md) - Environment variables and local development setup
+- [Safe Credential Handling](./docs/SAFE_CREDENTIAL_HANDLING.md) - Best practices for protecting secret keys, viewing keys, and employee salary data
 - [Troubleshooting Guide](./docs/TROUBLESHOOTING.md) - Fixes for common install, build, and test failures
 - [API Reference](./docs/API.md) - Complete API documentation
 - [Pagination Helpers](./docs/pagination.md) - Cursor- and offset-based pagination for payroll history and audit records
+- [Audit Grant Scope Reader](./docs/audit-grant-scope.md) - Effective audit scope and lifecycle state for an auditor's grants
 - [Payroll UX Helpers](./docs/payroll-ux-helpers.md) - Configurable logging, completion polling, run summaries, and command serialization
 - [ZK Proof Generation](./docs/ZK_PROOF_GENERATION.md) - Detailed proof generation guide
 - [Examples](./examples/README.md) - Runnable examples and setup steps
@@ -769,8 +1183,4 @@ npm run test -w packages/core
 ```
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/setup.md](./docs/setup.md) for
-full contributor workflow, pre-commit hooks, and troubleshooting. 
-
-
-
-draft pr 
+full contributor workflow, pre-commit hooks, and troubleshooting.

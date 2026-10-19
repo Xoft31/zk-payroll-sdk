@@ -242,7 +242,119 @@ function validateAuditSettings(
   }
 }
 
+// ── Effective-date validation ────────────────────────────────────────────────
+
+/**
+ * Normalizes an effective/expiration date input to epoch milliseconds.
+ *
+ * Accepts ISO 8601 strings (e.g. `"2026-10-01T00:00:00Z"`, `"2026-10-01"`) or
+ * epoch milliseconds.
+ *
+ * @returns `NaN` when the input is missing or unparseable.
+ */
+function parseDateInput(value: string | number | undefined): number {
+  if (value === undefined) return NaN;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+/**
+ * Formats an epoch-ms value as a UTC ISO-8601 date string for error messages.
+ */
+function formatUtcDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function validateEffectiveDates(
+  input: Pick<PayrollPolicyInput, "effectiveDate" | "endDate">,
+  nowMs: number,
+  errors: PolicyCompileError[]
+): { effectiveDateMs?: number; endDateMs?: number } {
+  const { effectiveDate, endDate } = input;
+  const hasEffective = effectiveDate !== undefined;
+  const hasEnd = endDate !== undefined;
+
+  // endDate without effectiveDate is incoherent — require the pair.
+  if (hasEnd && !hasEffective) {
+    errors.push(
+      err(
+        PolicyCompileErrorCode.INVALID_EFFECTIVE_DATE,
+        "endDate",
+        "endDate requires effectiveDate to be set as well.",
+        { endDate }
+      )
+    );
+    return {};
+  }
+
+  if (!hasEffective) return {};
+
+  const effectiveMs = parseDateInput(effectiveDate);
+  if (Number.isNaN(effectiveMs)) {
+    errors.push(
+      err(
+        PolicyCompileErrorCode.INVALID_EFFECTIVE_DATE,
+        "effectiveDate",
+        "effectiveDate must be a valid date (ISO 8601 date/datetime string or epoch milliseconds).",
+        { effectiveDate }
+      )
+    );
+    return {};
+  }
+
+  if (effectiveMs < nowMs) {
+    errors.push(
+      err(
+        PolicyCompileErrorCode.INVALID_EFFECTIVE_DATE,
+        "effectiveDate",
+        `effectiveDate (${formatUtcDate(effectiveMs)}) must not be in the past (today is ${formatUtcDate(nowMs)}).`,
+        { effectiveDate, effectiveDateMs: effectiveMs, nowMs }
+      )
+    );
+    return {};
+  }
+
+  if (!hasEnd) return { effectiveDateMs: effectiveMs };
+
+  const endMs = parseDateInput(endDate);
+  if (Number.isNaN(endMs)) {
+    errors.push(
+      err(
+        PolicyCompileErrorCode.INVALID_EFFECTIVE_DATE,
+        "endDate",
+        "endDate must be a valid date (ISO 8601 date/datetime string or epoch milliseconds).",
+        { endDate }
+      )
+    );
+    return {};
+  }
+
+  if (endMs <= effectiveMs) {
+    errors.push(
+      err(
+        PolicyCompileErrorCode.INVALID_EFFECTIVE_DATE,
+        "endDate",
+        `endDate (${formatUtcDate(endMs)}) must be after effectiveDate (${formatUtcDate(effectiveMs)}).`,
+        { endDate, endDateMs: endMs, effectiveDateMs: effectiveMs }
+      )
+    );
+    return {};
+  }
+
+  return { effectiveDateMs: effectiveMs, endDateMs: endMs };
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────
+
+/** Options for {@link compilePayrollPolicy}. */
+export interface CompilePolicyOptions {
+  /**
+   * Reference time (epoch ms) used for the effective-date "not in the past"
+   * check. Defaults to the current wall-clock time. Pass a fixed value in
+   * tests or replay/backfill flows to keep compilation deterministic.
+   */
+  now?: number;
+}
 
 /**
  * Compiles a human-readable {@link PayrollPolicyInput} into a validated,
@@ -256,6 +368,10 @@ function validateAuditSettings(
  * `JSON.stringify` for logging, snapshotting, or transport, while remaining
  * round-trippable via `BigInt(value)`.
  *
+ * When `effectiveDate` is provided it must parse to a real date and must not
+ * be in the past (relative to `options.now ?? Date.now()`); an `endDate` must
+ * also parse and be strictly after `effectiveDate`.
+ *
  * @example
  * ```typescript
  * import { compilePayrollPolicy } from "@zk-payroll/core";
@@ -263,6 +379,8 @@ function validateAuditSettings(
  * const result = compilePayrollPolicy({
  *   policyId: "default",
  *   asset: "native",
+ *   effectiveDate: "2026-10-01T00:00:00Z",
+ *   endDate: "2027-10-01T00:00:00Z",
  *   settlementWindow: { minDelaySeconds: 60, maxOpenSeconds: 3600 },
  *   capacityLimits: {
  *     maxBatchSize: 500,
@@ -280,7 +398,10 @@ function validateAuditSettings(
  * }
  * ```
  */
-export function compilePayrollPolicy(input: PayrollPolicyInput): CompilePolicyResult {
+export function compilePayrollPolicy(
+  input: PayrollPolicyInput,
+  options: CompilePolicyOptions = {}
+): CompilePolicyResult {
   const errors: PolicyCompileError[] = [];
 
   if (!input.policyId || input.policyId.trim() === "") {
@@ -314,6 +435,12 @@ export function compilePayrollPolicy(input: PayrollPolicyInput): CompilePolicyRe
   validateReserveRequirements(input.reserveRequirements, input.capacityLimits, errors);
   validateAuditSettings(input.auditSettings, errors);
 
+  const dates = validateEffectiveDates(
+    { effectiveDate: input.effectiveDate, endDate: input.endDate },
+    options.now ?? Date.now(),
+    errors
+  );
+
   // Cross-field check: reserve must not exceed the total payout capacity,
   // since a policy that reserves more than it can ever pay out is incoherent.
   if (
@@ -346,6 +473,8 @@ export function compilePayrollPolicy(input: PayrollPolicyInput): CompilePolicyRe
   const compiled: CompiledPayrollPolicy = {
     policyId: input.policyId.trim(),
     assetId: assetId as string,
+    ...(dates.effectiveDateMs !== undefined ? { effectiveDateMs: dates.effectiveDateMs } : {}),
+    ...(dates.endDateMs !== undefined ? { endDateMs: dates.endDateMs } : {}),
     settlement: {
       minDelaySeconds: input.settlementWindow.minDelaySeconds,
       maxOpenSeconds: input.settlementWindow.maxOpenSeconds,
@@ -379,8 +508,11 @@ export function compilePayrollPolicy(input: PayrollPolicyInput): CompilePolicyRe
  *
  * @throws {PolicyCompileError} on any validation failure.
  */
-export function compilePayrollPolicyOrThrow(input: PayrollPolicyInput): CompiledPayrollPolicy {
-  const result = compilePayrollPolicy(input);
+export function compilePayrollPolicyOrThrow(
+  input: PayrollPolicyInput,
+  options: CompilePolicyOptions = {}
+): CompiledPayrollPolicy {
+  const result = compilePayrollPolicy(input, options);
   if (!result.ok) {
     const [first, ...rest] = result.errors;
     first.context.allErrors = result.errors.map((e) => ({

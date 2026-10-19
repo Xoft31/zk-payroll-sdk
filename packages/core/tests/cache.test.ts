@@ -54,6 +54,23 @@ describe("MemoryCacheProvider", () => {
     expect(await cache.get("ttl")).toBe("val");
     jest.useRealTimers();
   });
+
+  it("returns age, expiry, stale state, and revision metadata", async () => {
+    jest.useFakeTimers().setSystemTime(10_000);
+    await cache.setWithMetadata("versioned", "value", { ttlSeconds: 10, revision: "r7" });
+    jest.advanceTimersByTime(2_500);
+
+    const result = await cache.getWithMetadata("versioned");
+    expect(result?.value).toBe("value");
+    expect(result?.metadata).toEqual({
+      storedAt: 10_000,
+      expiresAt: 20_000,
+      ageMs: 2_500,
+      stale: false,
+      revision: "r7",
+    });
+    jest.useRealTimers();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -129,6 +146,19 @@ describe("LocalStorageCacheProvider", () => {
     expect(await cache.has("k")).toBe(false);
     await cache.set("k", "v");
     expect(await cache.has("k")).toBe(true);
+  });
+
+  it("returns freshness metadata and revision", async () => {
+    jest.useFakeTimers().setSystemTime(20_000);
+    const cache = new LocalStorageCacheProvider();
+    await cache.setWithMetadata("versioned", "value", { ttlSeconds: 5, revision: "r3" });
+    jest.advanceTimersByTime(1_500);
+
+    const result = await cache.getWithMetadata("versioned");
+    expect(result?.metadata.ageMs).toBe(1_500);
+    expect(result?.metadata.revision).toBe("r3");
+    expect(result?.metadata.stale).toBe(false);
+    jest.useRealTimers();
   });
 });
 

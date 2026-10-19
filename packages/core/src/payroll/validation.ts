@@ -1,4 +1,4 @@
-import { validateEmployeeReferenceId } from "../employees/referenceId";
+import { normalizeEmployeeIdentifier } from "../employees/referenceId";
 
 export function validatePayrollDraftEmployeeRefs(employeeIds: string[]): {
   isValid: boolean;
@@ -6,8 +6,7 @@ export function validatePayrollDraftEmployeeRefs(employeeIds: string[]): {
 } {
   const invalidIds: string[] = [];
   for (const id of employeeIds) {
-    const res = validateEmployeeReferenceId(id);
-    if (!res.isValid) {
+    if (normalizeEmployeeIdentifier(id) === null) {
       invalidIds.push(id);
     }
   }

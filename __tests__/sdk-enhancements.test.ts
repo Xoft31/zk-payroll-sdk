@@ -1,10 +1,11 @@
 /**
- * Integration tests for SDK enhancements (issues #469, #470, #471).
+ * Integration tests for SGK enhancements (issues #469, #470, #471, #472).
  *
  * These tests verify the implementation of:
  * - Employee lifecycle client API (issue #469)
  * - Request correlation IDs (issue #470)
  * - Configurable transaction timeout (issue #471)
+ * - Safe payroll batch submission helper (issue #472)
  */
 
 import { CorrelationContext } from "../packages/core/src/core/correlation";
@@ -75,7 +76,7 @@ describe("Issue #469 - Employee Lifecycle Client API", () => {
       error?: string;
     };
     const result: Result = {
-      employeeAddress: "GABC123...",
+      employeeAddress: "G@ABC123...",
       operation: "create",
       success: true,
     };
@@ -134,3 +135,133 @@ describe("Issue #475 - Event Decoding for Employee Status Updates", () => {
   });
 });
 
+describe("Issue #473 - SGK Asset Availability Safety Check", () => {
+  it("exports asset availability check functions and types", async () => {
+    const {
+      checkAssetAvailability,
+      assertAssetAvailable,
+      AssetAvailabilityError,
+    } = await import("../packages/core/src/assets/availability");
+
+    expect(typeof checkAssetAvailability).toBe("function");
+    expect(typeof assertAssetAvailable).toBe("function");
+    expect(typeof AssetAvailabilityError).toBe("function");
+  });
+
+  it("reports available assets with a resolved contract ID", async () => {
+    const { checkAssetAvailability } = await import(
+      "../packages/core/src/assets/availability"
+    );
+
+    const result = await checkAssetAvailability(
+      { assetCode: "XYZ", contractId: "CABCDE..." },
+      {
+        lookupAsset: async () => ({ assetCode: "XYZ", contractId: "CABCDE..." }),
+        contractExists: async () => true,
+      }
+    );
+
+    expect(result.available).toBe(true);
+    expect(result.assetCode).toBe("XYZ");
+    expect(result.contractId).toBe("CABCDE...");
+  });
+
+  it("reports assets with missing contract IDs as unavailable", async () => {
+    const { checkAssetAvailability } = await import(
+      "../packages/core/src/assets/availability"
+    );
+
+    const result = await checkAssetAvailability(
+      { assetCode: "XYZ" },
+      {
+        lookupAsset: async () => ({ assetCode: "XYZ" }),
+        contractExists: async () => true,
+      }
+    );
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toContain("contract");
+  });
+
+  it("reports assets whose contract does not exist as unavailable", async () => {
+    const { checkAssetAvailability } = await import(
+      "../packages/core/src/assets/availability"
+    );
+
+    const result = await checkAssetAvailability(
+      { assetCode: "XYZ", contractId: "CABCDE..." },
+      {
+        lookupAsset: async () => ({ assetCode: "XYZ", contractId: "CABCDE..." }),
+        contractExists: async () => false,
+      }
+    );
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toContain("not found");
+  });
+
+  it("reports unknown asset codes as unavailable", async () => {
+    const { checkAssetAvailability } = await import(
+      "../packages/core/src/assets/availability"
+    );
+
+    const result = await checkAssetAvailability(
+      { assetCode: "UNKNOWN" },
+      {
+        lookupAsset: async () => null,
+        contractExists: async () => true,
+      }
+    );
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toContain("unknown");
+  });
+
+  it("rejects invalid asset codes with an actionable error", async () => {
+    const { checkAssetAvailability, AssetAvailabilityError } = await import(
+      "../packages/core/src/assets/availability"
+    );
+
+    await expect(
+      checkAssetAvailability(
+        { assetCode: "" },
+        {
+          lookupAsset: async () => null,
+          contractExists: async () => true,
+        }
+      )
+    ).rejects.toThrow(AssetAvailabilityError);
+  });
+
+  it("assertAssetAvailable throws for unavailable assets", async () => {
+    const { assertAssetAvailable, AssetAvailabilityError } = await import(
+      "../packages/core/src/assets/availability"
+    );
+
+    await expect(
+      assertAssetAvailable(
+        { assetCode: "XYZ", contractId: "CABCDE..." },
+        {
+          lookupAsset: async () => ({ assetCode: "XYZ", contractId: "CABCDE..." }),
+          contractExists: async () => false,
+        }
+      )
+    ).rejects.toThrow(AssetAvailabilityError);
+  });
+
+  it("assertAssetAvailable resolves for available assets", async () => {
+    const { assertAssetAvailable } = await import(
+      "../packages/core/src/assets/availability"
+    );
+
+    const result = await assertAssetAvailable(
+      { assetCode: "XYZ", contractId: "CABCDE..." },
+      {
+        lookupAsset: async () => ({ assetCode: "XYZ", contractId: "CABCDE..." }),
+        contractExists: async () => true,
+      }
+    );
+
+    expect(result.available).toBe(true);
+  });
+});

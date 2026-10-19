@@ -25,32 +25,14 @@
 
 import { AssetMetadata } from "./types";
 import { getDecimalScaleFactor, assertValidDecimals, DEFAULT_ASSET_DECIMALS } from "./decimals";
+// `RoundingMode` is defined once in `amountParsing.ts` and re-exported here
+// (rather than redeclared) so the SDK has a single canonical enum —
+// `amountParsing`/`compat-exports` already treat it as canonical. The
+// package barrel (`assets/index.ts`) re-exports this module's other members
+// explicitly to avoid re-exporting `RoundingMode` from two places.
+import { RoundingMode } from "./amountParsing";
 
-/**
- * Deterministic rounding strategies for scaling between precisions.
- */
-export enum RoundingMode {
-  /**
-   * Round half away from zero (standard rounding).
-   * 150 → 200 (when scaling 150 with 2 decimals to 1 decimal: 1.50 → 2.0)
-   */
-  HALF_UP = "HALF_UP",
-  /**
-   * Truncate (round toward zero). Drops excess digits.
-   * 199 → 100 (when scaling to 1 decimal: 1.99 → 1.9)
-   */
-  TRUNCATE = "TRUNCATE",
-  /**
-   * Round up (ceiling for positive values).
-   * 101 → 200 (when scaling to 1 decimal: 1.01 → 1.1)
-   */
-  CEIL = "CEIL",
-  /**
-   * Round down (floor for positive values).
-   * 199 → 100 (when scaling to 1 decimal: 1.99 → 1.9)
-   */
-  FLOOR = "FLOOR",
-}
+export { RoundingMode };
 
 /**
  * Options for rounding an amount to a target precision.
